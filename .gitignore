@@ -14,3 +14,5 @@ observability/grafana/data/
 operations/results/*.json
 .idea/
 .vscode/
+
+docs
