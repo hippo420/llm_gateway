@@ -1,0 +1,74 @@
+# LLM Gateway - Model Registry (Base Configuration)
+#
+# 정본(Source of Truth)이다. 영구 변경은 여기에 하고 커밋한다.
+# 운영 중 임시 변경은 Redis override (Phase 4).
+#
+# 명세: docs/specs/config-spec.md
+
+version: 1
+
+defaults:
+  timeout:
+    connect: 5      # 연결
+    read: 30        # streaming 에서는 chunk 간 무응답 허용 시간
+    total: 180      # 전체
+  options:
+    temperature: 0.2
+    top_p: 0.9
+    max_tokens: 2048
+
+models:
+  # ── 논리 모델명. Spring AI 가 이 이름으로 호출한다 ──────────────
+  qwen-7b:
+    description: "일반 질의 / 요약 / 뉴스 분류용 기본 모델"
+    deployments:
+      - id: qwen-7b@ollama
+        adapter: ollama
+        endpoint: http://localhost:11434
+        upstream_model: qwen2.5:7b
+        enabled: true
+        weight: 100                 # Phase 5 부터 사용
+        timeout:
+          read: 60                  # 첫 요청은 모델 로딩으로 느릴 수 있다
+        options:
+          temperature: 0.2
+          max_tokens: 2048
+        extra:
+          keep_alive: 30m           # cold start(진단 R6) 방지
+
+  # ── Phase 5 에서 활성화할 비교 대상 ────────────────────────────
+  qwen-14b:
+    description: "복잡한 리포트 분석용 (Phase 5 이후)"
+    deployments:
+      - id: qwen-14b@vllm
+        adapter: vllm
+        endpoint: http://localhost:8000
+        upstream_model: Qwen/Qwen2.5-14B-Instruct
+        enabled: false
+        weight: 0
+        timeout:
+          read: 60
+          total: 300
+        options:
+          max_tokens: 4096
+
+# ── Phase 5 ────────────────────────────────────────────────────
+routing:
+  strategy: static                  # static | weighted | health_aware
+  bucket_header: X-Session-Id
+
+# ── Phase 6 ────────────────────────────────────────────────────
+resilience:
+  retry:
+    max_attempts: 2
+    initial_delay_ms: 200
+    max_delay_ms: 2000
+    jitter: true
+    retry_on_stream_started: false  # 절대 true 로 두지 말 것
+  fallback:
+    enabled: false
+    max_chain: 2
+  circuit_breaker:
+    enabled: false
+    failure_threshold: 5
+    cooldown_sec: 30
