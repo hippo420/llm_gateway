@@ -29,6 +29,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# PEP 561 - mypy 가 설치된 패키지를 타입 체크할 수 있게 한다.
+llm_gateway = ["py.typed"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
@@ -40,6 +44,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# Depends() 를 인자 기본값에 두는 것은 FastAPI 의 정식 사용법이다.
+"src/llm_gateway/api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

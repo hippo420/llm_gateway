@@ -9,29 +9,57 @@ OpenTelemetry traceparent 는 Phase 2 후반. 먼저 이것부터 확실히 동�
 
 from __future__ import annotations
 
+import re
+
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ..core.context import (
+    RequestContext,
+    new_request_id,
+    reset_request_context,
+    set_request_context,
+)
+
 REQUEST_ID_HEADER = "X-Request-Id"
 SESSION_ID_HEADER = "X-Session-Id"
 REQUEST_TYPE_HEADER = "X-Request-Type"
+
+MAX_HEADER_VALUE_LEN = 128
+# 외부에서 들어오는 값이다. 로그 오염/헤더 주입을 막기 위해 문자 집합을 좁힌다.
+_SAFE_VALUE = re.compile(rf"^[A-Za-z0-9._:@\-]{{1,{MAX_HEADER_VALUE_LEN}}}$")
+
+
+def _sanitize(value: str | None) -> str | None:
+    """허용 문자만으로 된 값이면 그대로, 아니면 None."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value if _SAFE_VALUE.match(value) else None
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        """TODO: 구현.
+        request_id = _sanitize(request.headers.get(REQUEST_ID_HEADER)) or new_request_id()
 
-          1. 헤더에서 X-Request-Id 를 읽는다. 없으면 new_request_id().
-             - 외부에서 온 값이므로 길이/문자 제한을 둔다 (로그 오염·주입 방지).
-               예: 128자 초과하거나 개행이 섞이면 새로 발급한다.
-          2. RequestContext 를 만들어 set_request_context()
-             (session_id, request_type 헤더도 함께 담는다 - Phase 5/7 에서 쓴다)
-          3. request.state.ctx 에도 넣어 라우터가 쉽게 꺼내 쓰게 한다
-          4. response = await call_next(request)
-          5. response.headers[REQUEST_ID_HEADER] = request_id
-             **에러 응답에도 반드시 붙어야 한다.** 예외 경로를 빠뜨리지 말 것.
-        """
-        raise NotImplementedError
+        ctx = RequestContext(
+            request_id=request_id,
+            session_id=_sanitize(request.headers.get(SESSION_ID_HEADER)),
+            request_type=_sanitize(request.headers.get(REQUEST_TYPE_HEADER)),
+        )
+        # 라우터는 request.state.ctx 로, 로깅은 contextvar 로 꺼내 쓴다.
+        request.state.ctx = ctx
+        token = set_request_context(ctx)
+
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_context(token)
+
+        # 에러 응답에도 반드시 붙어야 한다. 예외 경로는 핸들러가 응답을 만들어
+        # 여기로 돌아오므로 이 한 줄로 모두 덮인다.
+        response.headers[REQUEST_ID_HEADER] = request_id
+        return response

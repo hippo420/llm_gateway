@@ -13,6 +13,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..core.errors import ModelNotFoundError, NoAvailableDeploymentError
+
+
+def _override_fields(override: BaseModel | dict[str, Any] | None) -> dict[str, Any]:
+    """병합용 override dict. **None 값(=미지정)은 걸러낸다.**"""
+    if override is None:
+        return {}
+    raw = override.model_dump() if isinstance(override, BaseModel) else dict(override)
+    return {k: v for k, v in raw.items() if v is not None}
+
 
 class TimeoutConfig(BaseModel):
     """3단계 timeout. 하나로 합치면 원인 구분이 불가능하다 (docs/phases/phase-06)."""
@@ -22,9 +32,9 @@ class TimeoutConfig(BaseModel):
     read: float = 30.0
     total: float = 180.0
 
-    def merged_with(self, override: "TimeoutConfig | dict[str, Any] | None") -> "TimeoutConfig":
-        """TODO: 부분 override 병합. override 에 없는 필드는 self 값 유지."""
-        raise NotImplementedError
+    def merged_with(self, override: TimeoutConfig | dict[str, Any] | None) -> TimeoutConfig:
+        """부분 override 병합. override 에 없는 필드는 self 값을 유지한다."""
+        return TimeoutConfig(**{**self.model_dump(), **_override_fields(override)})
 
 
 class GenerationOptions(BaseModel):
@@ -36,13 +46,15 @@ class GenerationOptions(BaseModel):
     stop: list[str] | None = None
     seed: int | None = None
 
-    def merged_with(self, override: "GenerationOptions | dict[str, Any] | None") -> "GenerationOptions":
-        """TODO: 부분 override 병합.
+    def merged_with(
+        self, override: GenerationOptions | dict[str, Any] | None
+    ) -> GenerationOptions:
+        """부분 override 병합.
 
-        주의: override 의 값이 None 이면 "미지정"이므로 **덮어쓰지 않는다.**
-              이걸 놓치면 요청에서 생략한 파라미터가 기본값을 지워버린다.
+        override 의 값이 None 이면 "미지정"이므로 **덮어쓰지 않는다.**
+        이걸 놓치면 요청에서 생략한 파라미터가 기본값을 지워버린다.
         """
-        raise NotImplementedError
+        return GenerationOptions(**{**self.model_dump(), **_override_fields(override)})
 
 
 class ModelDeployment(BaseModel):
@@ -102,37 +114,49 @@ class ModelRegistry:
         return self._snapshot
 
     def swap(self, snapshot: RegistrySnapshot) -> None:
-        """TODO: 원자적 교체 (Phase 4).
+        """검증된 스냅샷으로 원자적 교체 (Phase 4 에서 reload 가 사용한다).
 
-        검증에 성공한 스냅샷만 넣는다. 실패 시 기존 것을 유지하고 예외를 올린다.
+        참조 하나만 바꾼다. 처리 중인 요청은 이미 꺼내 쓴 옛 스냅샷을 끝까지 쓴다.
         """
-        raise NotImplementedError
+        self._snapshot = snapshot
 
     def candidates(self, logical_model: str) -> list[ModelDeployment]:
         """논리 모델의 **활성 후보 전체**를 반환한다.
 
-        TODO: 구현.
-          - 모델이 없으면 ModelNotFoundError (GW-4001)
-          - enabled=False 는 제외
-          - 결과가 비면 NoAvailableDeploymentError (GW-4004)
-          - Phase 6: circuit breaker 가 OPEN 인 것도 여기서 제외하게 된다
+        Phase 6 에서는 circuit breaker 가 OPEN 인 것도 여기서 제외하게 된다.
         """
-        raise NotImplementedError
+        entry = self._snapshot.models.get(logical_model)
+        if entry is None:
+            raise ModelNotFoundError(
+                f"model '{logical_model}' is not registered",
+                detail={"model": logical_model},
+            )
+
+        enabled = [d for d in entry.deployments if d.enabled]
+        if not enabled:
+            raise NoAvailableDeploymentError(
+                f"no available deployment for model '{logical_model}'",
+                detail={"model": logical_model, "total": len(entry.deployments)},
+            )
+        return enabled
 
     def resolve(self, logical_model: str) -> ModelDeployment:
-        """단일 deployment 선택 (Phase 1 임시).
-
-        TODO: 구현. candidates() 의 첫 번째를 반환한다.
+        """단일 deployment 선택 (Phase 1 임시). 후보의 첫 번째를 쓴다.
 
         Phase 5 에서 이 메서드는 **삭제**되고 ModelRouter 가 대체한다.
         따라서 호출부를 늘리지 말 것 (ChatService 한 곳에서만 쓴다).
         """
-        raise NotImplementedError
+        return self.candidates(logical_model)[0]
 
     def list_models(self) -> list[ModelEntry]:
-        """TODO: GET /v1/models 용. disabled deployment 도 포함해서 보여준다."""
-        raise NotImplementedError
+        """GET /v1/models 용. disabled deployment 도 포함해서 보여준다."""
+        return list(self._snapshot.models.values())
 
     def all_deployments(self) -> list[ModelDeployment]:
-        """TODO: readyz 헬스체크용. enabled 인 것만."""
-        raise NotImplementedError
+        """readyz 헬스체크용. enabled 인 것만."""
+        return [
+            d
+            for entry in self._snapshot.models.values()
+            for d in entry.deployments
+            if d.enabled
+        ]

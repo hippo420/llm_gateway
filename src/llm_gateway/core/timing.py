@@ -39,16 +39,24 @@ class ChatTimings:
     def output_tps(self, output_tokens: int | None) -> float | None:
         """Output Tokens Per Second.
 
-        TODO: 구현.
-              output_tokens / generation_sec
-              generation_sec 이 None 이거나 0 에 매우 가까우면 None 을 반환한다.
-              (아주 짧은 응답에서 division guard 없이 계산하면 TPS 가 수천으로 튄다)
+        generation_sec 이 없거나 0 에 매우 가까우면 None 을 반환한다.
+        (아주 짧은 응답에서 division guard 없이 계산하면 TPS 가 수천으로 튄다)
         """
-        raise NotImplementedError
+        return _safe_rate(output_tokens, self.generation_sec)
 
     def input_tps(self, input_tokens: int | None) -> float | None:
-        """TODO: input_tokens / prompt_eval_sec. prompt_eval_sec 없으면 None."""
-        raise NotImplementedError
+        """Input(prefill) Tokens Per Second. prompt_eval_sec 이 없으면 None."""
+        return _safe_rate(input_tokens, self.prompt_eval_sec)
+
+
+# 이보다 짧은 구간으로 나눈 TPS 는 노이즈다. 계산하지 않고 None 을 돌려준다.
+_MIN_MEASURABLE_SEC = 1e-3
+
+
+def _safe_rate(tokens: int | None, seconds: float | None) -> float | None:
+    if tokens is None or seconds is None or seconds < _MIN_MEASURABLE_SEC:
+        return None
+    return tokens / seconds
 
 
 class Stopwatch:
@@ -70,27 +78,47 @@ class Stopwatch:
         self._first_token_at: float | None = None
         self._finished_at: float | None = None
 
-    def start(self) -> "Stopwatch":
-        """TODO: perf_counter() 기록 후 self 반환."""
-        raise NotImplementedError
+    def start(self) -> Stopwatch:
+        self._started_at = _monotonic()
+        return self
 
     def mark_first_token(self) -> None:
-        """TODO: 최초 1회만 기록한다 (두 번째 이후 호출은 무시).
+        """최초 1회만 기록한다 (두 번째 이후 호출은 무시).
 
         호출 위치가 중요하다. OpenAI 호환 스트림의 첫 chunk 는 delta.role 만 담고
         content 가 비어 있는 경우가 많다. 그것을 첫 토큰으로 세면 TTFT 가 실제보다 짧게 나온다.
         -> **delta 문자열이 비어있지 않을 때만** 호출할 것.
         """
-        raise NotImplementedError
+        if self._first_token_at is None:
+            self._first_token_at = _monotonic()
 
     def finish(self) -> ChatTimings:
-        """TODO: total_sec / ttft_sec / generation_sec 을 채운 ChatTimings 반환."""
-        raise NotImplementedError
+        """total_sec / ttft_sec / generation_sec 을 채운 ChatTimings 를 만든다."""
+        if self._started_at is None:
+            raise RuntimeError("Stopwatch.start() was not called")
+        if self._finished_at is None:
+            self._finished_at = _monotonic()
+
+        total_sec = self._finished_at - self._started_at
+        ttft_sec = (
+            None if self._first_token_at is None else self._first_token_at - self._started_at
+        )
+        # 첫 토큰을 못 본 호출(non-streaming)에서는 generation 을 분리할 수 없다.
+        generation_sec = None if ttft_sec is None else total_sec - ttft_sec
+
+        return ChatTimings(
+            total_sec=total_sec,
+            ttft_sec=ttft_sec,
+            generation_sec=generation_sec,
+        )
 
     @property
     def elapsed_sec(self) -> float:
-        """TODO: 시작 이후 경과 시간 (finish 전에도 조회 가능)."""
-        raise NotImplementedError
+        """시작 이후 경과 시간 (finish 전에도 조회 가능)."""
+        if self._started_at is None:
+            raise RuntimeError("Stopwatch.start() was not called")
+        end = self._finished_at if self._finished_at is not None else _monotonic()
+        return end - self._started_at
 
 
 def ns_to_sec(value: int | None) -> float | None:

@@ -9,9 +9,16 @@ LLM 요약(토큰/TTFT/TPS)은 ChatService 가 "chat_completed" 이벤트로 따
 
 from __future__ import annotations
 
+import logging
+import time
+
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
+
+from ..core.logging import log_event
+
+log = logging.getLogger(__name__)
 
 
 class AccessLogMiddleware(BaseHTTPMiddleware):
@@ -21,15 +28,24 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        """TODO: 구현.
+        if request.url.path in self.SKIP_PATHS:
+            return await call_next(request)
 
-          - perf_counter 로 처리 시간 측정
-          - SKIP_PATHS 는 로그를 남기지 않는다
-          - log_event(log, "http_request", method=..., path=..., status=...,
-                      duration_ms=..., client=...)
-          - 예외가 나도 로그는 남긴다 (try/finally)
-
-        금지: query string 이나 body 를 통째로 남기지 말 것.
-              프롬프트가 섞여 들어온다.
-        """
-        raise NotImplementedError
+        started = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            return response
+        finally:
+            # 예외가 나도 로그는 남긴다.
+            # query string 과 body 는 남기지 않는다 - 프롬프트가 섞여 들어온다.
+            log_event(
+                log,
+                "http_request",
+                method=request.method,
+                path=request.url.path,
+                status=status,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                client=request.client.host if request.client else None,
+            )

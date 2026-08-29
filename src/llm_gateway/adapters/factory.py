@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from ..core.errors import AdapterNotRegisteredError
 from ..registry.models import ModelDeployment
 from .base import LLMAdapter
 from .ollama import OllamaAdapter
@@ -35,19 +36,45 @@ class AdapterFactory:
         self._instances: dict[str, LLMAdapter] = {}
 
     def get(self, deployment: ModelDeployment) -> LLMAdapter:
-        """TODO: 구현.
+        """deployment 에 대응하는 adapter 인스턴스를 돌려준다 (없으면 생성)."""
+        cached = self._instances.get(deployment.id)
+        if cached is not None:
+            # 설정이 reload 되어 접속 정보가 바뀌면 캐시된 client 는 옛 endpoint 를 가리킨다.
+            # Phase 4 의 reload 는 close_all() 을 부르지만, 여기서도 한 번 더 막는다.
+            if _connection_identity(cached.deployment) == _connection_identity(deployment):
+                return cached
+            del self._instances[deployment.id]
 
-          - 캐시 키는 deployment.id
-          - 캐시에 없으면 ADAPTER_REGISTRY 에서 클래스를 찾아 생성
-          - 등록되지 않은 adapter 이름이면 AdapterNotRegisteredError (GW-1003)
-          - 설정이 reload 되어 endpoint 가 바뀌면 캐시를 무효화해야 한다 (Phase 4).
-            지금은 deployment 를 통째로 비교하거나, reload 시 close_all() 을 부르는 방식.
-        """
-        raise NotImplementedError
+        adapter_cls = ADAPTER_REGISTRY.get(deployment.adapter)
+        if adapter_cls is None:
+            raise AdapterNotRegisteredError(
+                f"adapter {deployment.adapter} is not registered",
+                detail={
+                    "adapter": deployment.adapter,
+                    "deployment_id": deployment.id,
+                    "known": sorted(ADAPTER_REGISTRY),
+                },
+            )
+
+        instance = adapter_cls(deployment)
+        self._instances[deployment.id] = instance
+        return instance
+
+    def register(self, name: str, adapter: LLMAdapter) -> None:
+        """이미 만들어진 인스턴스를 캐시에 넣는다 (테스트에서 fake 로 바꿔치기할 때)."""
+        self._instances[name] = adapter
 
     async def close_all(self) -> None:
-        """TODO: 모든 adapter 의 aclose() 호출 후 캐시 비우기.
+        """모든 adapter 의 aclose() 호출 후 캐시를 비운다.
 
         app lifespan 종료 시 반드시 부른다. 안 부르면 uvicorn 종료가 매달린다.
         """
-        raise NotImplementedError
+        instances = list(self._instances.values())
+        self._instances.clear()
+        for adapter in instances:
+            await adapter.aclose()
+
+
+def _connection_identity(deployment: ModelDeployment) -> tuple[str, str, str]:
+    """캐시된 adapter 를 그대로 써도 되는지 판정하는 키."""
+    return (deployment.adapter, deployment.endpoint, deployment.upstream_model)

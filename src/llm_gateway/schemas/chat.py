@@ -46,15 +46,22 @@ class ChatCompletionRequest(BaseModel):
     @field_validator("messages")
     @classmethod
     def _messages_not_empty(cls, v: list[ChatMessage]) -> list[ChatMessage]:
-        """TODO: 비어 있으면 ValueError -> 라우터에서 GW-4000 으로 변환."""
-        raise NotImplementedError
+        """비어 있으면 ValueError -> 전역 핸들러가 GW-4000 으로 변환한다."""
+        if not v:
+            raise ValueError("messages must not be empty")
+        return v
 
     def unsupported_fields(self) -> list[str]:
-        """TODO: 설정된 미지원 필드 이름 목록 반환. 비어 있으면 정상.
-
-        n > 1 도 미지원으로 취급한다 (choices 를 하나만 만든다).
-        """
-        raise NotImplementedError
+        """설정된 미지원 필드 이름 목록. 비어 있으면 정상."""
+        fields = [
+            name
+            for name in ("tools", "tool_choice", "response_format")
+            if getattr(self, name) is not None
+        ]
+        # choices 를 하나만 만들기 때문에 n > 1 도 미지원이다.
+        if self.n is not None and self.n > 1:
+            fields.append("n")
+        return fields
 
 
 class ChatCompletionChoice(BaseModel):

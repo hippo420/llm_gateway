@@ -15,11 +15,15 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 1 뼈대 작성 완료 / 구현 대기.**
+**Phase 1 구현 완료.** (Spring 앱 연결 확인만 미실시)
 
-대부분의 함수 본문은 `NotImplementedError` + TODO 주석이다.
-구현 순서는 [`docs/phases/phase-01-llm-gateway.md`](docs/phases/phase-01-llm-gateway.md)
-"5. 구현 체크리스트" 를 따른다.
+- `pytest` 49개 통과 — **실제 Ollama 없이 돈다**
+- 남아 있는 `NotImplementedError` 는 Phase 2(metrics) / Phase 4(Redis config) 자리표시자뿐
+- 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
+  [`docs/phases/phase-01-implementation.md`](docs/phases/phase-01-implementation.md)
+
+다음 작업은 Phase 2 (계측). `ChatService` 의 `# Phase 2:` 주석 지점에
+metric 기록을 추가하면 된다 — 값은 이미 계산되어 있다.
 
 ---
 
@@ -28,6 +32,7 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 설계 문서가 정본이다. 코드를 고치기 전에 문서를 먼저 본다.
 
 - [docs/README.md](docs/README.md) — 문서 색인 / Phase 로드맵
+- [docs/phases/phase-01-implementation.md](docs/phases/phase-01-implementation.md) — Phase 1 구현 기록
 - [docs/00-architecture.md](docs/00-architecture.md) — 아키텍처, 책임 분리, 개발 규약
 - [docs/specs/api-spec.md](docs/specs/api-spec.md) — HTTP API
 - [docs/specs/adapter-interface.md](docs/specs/adapter-interface.md) — Adapter 계약
@@ -85,6 +90,16 @@ src/llm_gateway/
 ├── adapters/                LLMAdapter ABC + Ollama 구현
 ├── service/                 ChatService (오케스트레이션)
 └── observability/           Metrics (Phase 2)
+```
+
+요청 흐름:
+
+```text
+RequestIdMiddleware → AccessLogMiddleware → chat route
+   → ChatService.prepare()   검증 + deployment 선택 (스트림 시작 전)
+   → ChatService.complete()  내부 streaming 집계 → TTFT 확보
+   → OllamaAdapter           NDJSON 파싱 / 나노초 → 초 / 예외 → GatewayError
+   → 응답 정규화 + chat_completed 로그
 ```
 
 ---

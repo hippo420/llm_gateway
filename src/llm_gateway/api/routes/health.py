@@ -10,20 +10,31 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from fastapi import APIRouter, Depends, Response
 
 from ...adapters.factory import AdapterFactory
-from ...registry.models import ModelRegistry
-from ...schemas.common import HealthResponse, ReadyResponse
+from ...registry.models import ModelDeployment, ModelRegistry
+from ...schemas.common import (
+    AdapterHealth,
+    HealthResponse,
+    ReadyResponse,
+    RegistryHealth,
+)
 from ..dependencies import get_adapter_factory, get_registry
 
 router = APIRouter(tags=["health"])
 
+# adapter 하나가 느려도 readyz 전체가 늘어지지 않게 끊는다.
+HEALTH_TIMEOUT_SEC = 2.0
+
 
 @router.get("/healthz", response_model=HealthResponse)
 async def healthz() -> HealthResponse:
-    """TODO: HealthResponse(status="ok") 를 그대로 반환. 아무것도 검사하지 않는다."""
-    raise NotImplementedError
+    """프로세스 생존만 알린다. 아무것도 검사하지 않는다."""
+    return HealthResponse(status="ok")
 
 
 @router.get("/readyz", response_model=ReadyResponse)
@@ -32,15 +43,58 @@ async def readyz(
     registry: ModelRegistry = Depends(get_registry),
     adapters: AdapterFactory = Depends(get_adapter_factory),
 ) -> ReadyResponse:
-    """TODO: 구현.
-
-      1. registry 스냅샷 상태 (loaded, 모델 수, version)
-      2. enabled deployment 마다 adapter.health() 를 **병렬로** 호출 (asyncio.gather)
-         - 각 호출에 짧은 timeout (예: 2초). 순차 호출하면 readyz 가 느려진다
-      3. 하나라도 unhealthy 면 response.status_code = 503, status = "degraded"
+    """트래픽을 받을 준비가 됐는지 알린다.
 
     주의: Ollama 는 모델이 언로드된 상태에서도 /api/tags 에 응답한다.
           즉 여기서 healthy 여도 첫 요청은 느릴 수 있다 (cold start).
-          "모델이 GPU 에 올라와 있는가"는 별개 문제이므로 필요하면 warm-up 을 따로 둔다.
+          "모델이 GPU 에 올라와 있는가"는 별개 문제다.
     """
-    raise NotImplementedError
+    snapshot = registry.snapshot
+    deployments = registry.all_deployments()
+
+    # 순차 호출하면 deployment 수만큼 readyz 가 느려진다.
+    results = await asyncio.gather(
+        *(_check(adapters, dep) for dep in deployments),
+        return_exceptions=False,
+    )
+
+    healthy = all(r.healthy for r in results)
+    if not healthy:
+        response.status_code = 503
+
+    return ReadyResponse(
+        status="ready" if healthy else "degraded",
+        registry=RegistryHealth(
+            loaded=True,
+            models=len(snapshot.models),
+            version=snapshot.loaded_at,
+        ),
+        adapters=list(results),
+    )
+
+
+async def _check(adapters: AdapterFactory, deployment: ModelDeployment) -> AdapterHealth:
+    """adapter 하나의 도달 가능 여부. 예외는 여기서 흡수한다 (readyz 는 죽지 않는다)."""
+    started = time.perf_counter()
+    try:
+        async with asyncio.timeout(HEALTH_TIMEOUT_SEC):
+            ok = await adapters.get(deployment).health()
+    except TimeoutError:
+        return AdapterHealth(
+            deployment_id=deployment.id,
+            healthy=False,
+            error=f"health check timed out after {HEALTH_TIMEOUT_SEC}s",
+        )
+    except Exception as exc:  # noqa: BLE001 - readyz 는 어떤 경우에도 응답해야 한다
+        return AdapterHealth(
+            deployment_id=deployment.id,
+            healthy=False,
+            error=exc.__class__.__name__,
+        )
+
+    return AdapterHealth(
+        deployment_id=deployment.id,
+        healthy=ok,
+        latency_ms=round((time.perf_counter() - started) * 1000, 2),
+        error=None if ok else "endpoint returned an error status",
+    )

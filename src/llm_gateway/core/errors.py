@@ -63,11 +63,16 @@ class GatewayError(Exception):
     def to_error_body(self, request_id: str | None = None) -> dict[str, Any]:
         """OpenAI 호환 에러 body 로 직렬화한다.
 
-        TODO: 구현.
-              {"error": {"message", "type", "code", "request_id"}}
-              detail 은 로그에만 남기고 응답에는 넣지 않는다 (내부 정보 노출 방지).
+        detail 은 로그에만 남기고 응답에는 넣지 않는다 (내부 정보 노출 방지).
         """
-        raise NotImplementedError
+        return {
+            "error": {
+                "message": self.message,
+                "type": str(self.error_type),
+                "code": self.code,
+                "request_id": request_id,
+            }
+        }
 
 
 # ── GW-1xxx 설정 ────────────────────────────────────────────────
@@ -218,11 +223,27 @@ class InternalError(GatewayError):
     http_status = 500
 
 
+# GW-5001 upstream_error 는 upstream 상태코드가 아래에 속할 때만 재시도한다.
+RETRYABLE_UPSTREAM_STATUS = frozenset({502, 503, 504})
+
+# 상태와 무관하게 재시도하는 코드. (docs/specs/error-codes.md "재시도 판정 규칙")
+ALWAYS_RETRYABLE_CODES = frozenset({"GW-5002", "GW-5003", "GW-5007"})
+
+
 def is_retryable(error: GatewayError, *, stream_started: bool) -> bool:
     """재시도 가능 여부 판정 (Phase 6).
 
-    TODO: 구현.
-          규칙은 docs/specs/error-codes.md "재시도 판정 규칙" 절이 정본이다.
-          핵심: stream_started 가 True 면 무조건 False. 이미 클라이언트가 일부를 봤다.
+    규칙의 정본은 docs/specs/error-codes.md "재시도 판정 규칙" 이다.
+    핵심: stream_started 가 True 면 무조건 False. 이미 클라이언트가 일부를 봤다.
     """
-    raise NotImplementedError
+    if stream_started:
+        return False
+    if error.code in ALWAYS_RETRYABLE_CODES:
+        return True
+    if error.code == "GW-5004":
+        # read timeout: 첫 토큰 전이면 재시도 가능 (stream_started 는 위에서 걸렀다)
+        return True
+    if error.code == "GW-5001":
+        status = error.detail.get("upstream_status")
+        return status in RETRYABLE_UPSTREAM_STATUS
+    return False

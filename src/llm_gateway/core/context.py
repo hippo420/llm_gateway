@@ -10,11 +10,11 @@ request_id 를 contextvar 로 들고 다녀서, 로그/에러 응답 어디서�
 from __future__ import annotations
 
 import uuid
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
 
-_request_context: ContextVar["RequestContext | None"] = ContextVar(
+_request_context: ContextVar[RequestContext | None] = ContextVar(
     "llm_gateway_request_context", default=None
 )
 
@@ -47,20 +47,26 @@ def new_request_id() -> str:
     return uuid.uuid4().hex
 
 
-def set_request_context(ctx: RequestContext) -> None:
-    """TODO: contextvar 에 바인딩. 반환된 Token 을 미들웨어에서 reset 할지 결정할 것.
+def set_request_context(ctx: RequestContext) -> Token[RequestContext | None]:
+    """contextvar 에 바인딩하고 reset 용 Token 을 돌려준다.
 
     ASGI 는 요청마다 별도 task 에서 실행되므로 보통 reset 없이도 누수되지 않지만,
-    BackgroundTask 를 쓰기 시작하면 달라진다.
+    BackgroundTask 를 쓰기 시작하면 달라진다. 미들웨어가 finally 에서 reset 한다.
     """
-    raise NotImplementedError
+    return _request_context.set(ctx)
+
+
+def reset_request_context(token: Token[RequestContext | None]) -> None:
+    """set_request_context() 가 돌려준 Token 으로 이전 값을 복원한다."""
+    _request_context.reset(token)
 
 
 def get_request_context() -> RequestContext | None:
-    """TODO: 현재 컨텍스트 반환 (없으면 None)."""
-    raise NotImplementedError
+    """현재 컨텍스트 반환 (없으면 None)."""
+    return _request_context.get()
 
 
 def current_request_id() -> str | None:
-    """TODO: 편의 함수. 로깅 필터에서 사용."""
-    raise NotImplementedError
+    """편의 함수. 로깅 필터에서 사용."""
+    ctx = _request_context.get()
+    return ctx.request_id if ctx is not None else None

@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
+import httpx
 import pytest
 
 from llm_gateway.adapters.base import (
@@ -18,7 +20,25 @@ from llm_gateway.adapters.base import (
     AdapterUsage,
     LLMAdapter,
 )
-from llm_gateway.registry.models import ModelDeployment
+from llm_gateway.main import create_app
+from llm_gateway.registry.models import (
+    GenerationOptions,
+    ModelDeployment,
+    ModelEntry,
+    ModelRegistry,
+    RegistrySnapshot,
+    TimeoutConfig,
+)
+from llm_gateway.settings import Settings
+
+# FakeAdapter 가 마지막 chunk 에 싣는 값. Ollama 응답 샘플과 같은 모양이다.
+FAKE_USAGE = AdapterUsage(input_tokens=12, output_tokens=5, source="upstream")
+FAKE_TIMINGS = AdapterTimings(
+    queue_sec=None,
+    prompt_eval_sec=0.13,
+    generation_sec=0.42,
+    load_sec=0.01,
+)
 
 
 class FakeAdapter(LLMAdapter):
@@ -44,21 +64,41 @@ class FakeAdapter(LLMAdapter):
         self.calls: list[AdapterChatRequest] = []
 
     async def chat(self, request: AdapterChatRequest) -> AdapterChatResponse:
-        """TODO: 구현. self.calls 에 기록하고 고정 응답 반환."""
-        raise NotImplementedError
+        self.calls.append(request)
+        if self._error is not None:
+            raise self._error
+        return AdapterChatResponse(
+            content="".join(self._chunks),
+            finish_reason="stop",
+            usage=FAKE_USAGE,
+            timings=FAKE_TIMINGS,
+            upstream_model=request.model,
+        )
 
     async def stream_chat(  # type: ignore[override]
         self, request: AdapterChatRequest
     ) -> AsyncIterator[AdapterChatChunk]:
-        """TODO: 구현.
+        self.calls.append(request)
 
-          - first_token_delay 만큼 sleep 후 첫 chunk (TTFT 검증용)
-          - self._chunks 를 하나씩 yield
-          - 마지막에 finish_reason/usage/timings 를 담은 chunk
-          - self._error 가 있으면 지정 위치에서 raise
-        """
-        raise NotImplementedError
-        yield  # pragma: no cover
+        if self._first_token_delay:
+            await asyncio.sleep(self._first_token_delay)
+
+        for index, text in enumerate(self._chunks):
+            # error 는 첫 chunk 를 내보낸 뒤에 터뜨린다.
+            # 스트림이 이미 시작된 상태의 에러 처리를 검증하기 위함이다.
+            if self._error is not None and index == 1:
+                raise self._error
+            yield AdapterChatChunk(delta=text)
+
+        if self._error is not None and len(self._chunks) < 2:
+            raise self._error
+
+        yield AdapterChatChunk(
+            delta="",
+            finish_reason="stop",
+            usage=FAKE_USAGE,
+            timings=FAKE_TIMINGS,
+        )
 
     async def health(self) -> bool:
         return True
@@ -66,32 +106,86 @@ class FakeAdapter(LLMAdapter):
 
 @pytest.fixture
 def deployment() -> ModelDeployment:
-    """TODO: 테스트용 ModelDeployment 하나."""
-    raise NotImplementedError
+    """테스트용 ModelDeployment 하나. 기본 옵션이 적용됐는지 볼 수 있게 값을 채워둔다."""
+    return ModelDeployment(
+        id="qwen-7b@fake",
+        logical_model="qwen-7b",
+        adapter="fake",
+        endpoint="http://localhost:11434",
+        upstream_model="qwen2.5:7b",
+        enabled=True,
+        weight=100,
+        timeout=TimeoutConfig(connect=1, read=5, total=10),
+        options=GenerationOptions(temperature=0.2, top_p=0.9, max_tokens=2048),
+        extra={"keep_alive": "30m"},
+    )
 
 
 @pytest.fixture
-def registry(deployment: ModelDeployment):
-    """TODO: deployment 하나를 담은 ModelRegistry."""
-    raise NotImplementedError
+def registry(deployment: ModelDeployment) -> ModelRegistry:
+    """deployment 하나를 담은 ModelRegistry."""
+    return ModelRegistry(
+        RegistrySnapshot(
+            version=1,
+            loaded_at="2026-08-25T10:00:00+00:00",
+            models={
+                "qwen-7b": ModelEntry(
+                    name="qwen-7b",
+                    description="test model",
+                    deployments=[deployment],
+                ),
+                # 후보가 전부 disabled 인 경우(GW-4004)를 만들기 위한 모델
+                "qwen-off": ModelEntry(
+                    name="qwen-off",
+                    deployments=[
+                        deployment.model_copy(
+                            update={
+                                "id": "qwen-off@fake",
+                                "logical_model": "qwen-off",
+                                "enabled": False,
+                            }
+                        )
+                    ],
+                ),
+            },
+        )
+    )
 
 
 @pytest.fixture
-def app(registry):
-    """TODO: create_app() + app.state 를 테스트용으로 채운 FastAPI 앱.
+def fake_adapter(deployment: ModelDeployment) -> FakeAdapter:
+    return FakeAdapter(deployment)
 
-    AdapterFactory 를 FakeAdapter 로 바꿔치기한다.
+
+@pytest.fixture
+def app(registry: ModelRegistry, deployment: ModelDeployment, fake_adapter: FakeAdapter):
+    """create_app() + app.state 를 테스트용으로 채운 FastAPI 앱.
+
+    lifespan 을 돌리지 않고 app.state 를 직접 채운다.
+    실제 gateway.yaml 과 Ollama 에 의존하지 않게 하기 위함이다.
     """
-    raise NotImplementedError
+    from llm_gateway.adapters.factory import AdapterFactory
+    from llm_gateway.service.chat_service import ChatService
+
+    settings = Settings(api_key="", log_format="text")
+    application = create_app(settings)
+
+    adapters = AdapterFactory()
+    # deployment.id 로 캐시해두면 factory 가 ollama 를 새로 만들지 않는다.
+    adapters.register(deployment.id, fake_adapter)
+
+    application.state.registry = registry
+    application.state.adapters = adapters
+    application.state.chat_service = ChatService(registry, adapters)
+    return application
 
 
 @pytest.fixture
-async def client(app):
-    """TODO: httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+async def client(app) -> AsyncIterator[httpx.AsyncClient]:
+    """실제 소켓을 열지 않으므로 빠르고 포트 충돌이 없다."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
 
-    실제 소켓을 열지 않으므로 빠르고 포트 충돌이 없다.
-    """
-    raise NotImplementedError
 
-
-__all__ = ["FakeAdapter", "AdapterUsage", "AdapterTimings"]
+__all__ = ["AdapterTimings", "AdapterUsage", "FakeAdapter"]
