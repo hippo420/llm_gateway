@@ -24,7 +24,7 @@ models:
     deployments:
       - id: qwen-7b@ollama
         adapter: ollama
-        endpoint: http://localhost:11434
+        endpoint: http://[::1]:11434
         upstream_model: qwen2.5:7b
         enabled: true
         weight: 100                 # Phase 5 부터 사용
