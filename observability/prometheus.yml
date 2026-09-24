@@ -1,0 +1,32 @@
+# docs/operations/observability-stack.md "3. prometheus.yml"
+global:
+  # 진단 주기(1분)와 정렬. 더 짧게 잡으면 저장량만 늘고 판단은 나아지지 않는다.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # GATEWAY_PORT 를 바꿨다면 여기도 맞출 것.
+  - job_name: llm-gateway
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels: { service: llm-gateway }
+
+  # Ollama 는 Prometheus /metrics 를 노출하지 않는다 (404). 서빙 부하는
+  # llm_gateway_inflight_requests 로 대체한다. 노출하는 버전이 나오면 주석을 푼다.
+  # - job_name: ollama
+  #   static_configs:
+  #     - targets: ["host.docker.internal:11434"]
+  #       labels: { serving: ollama }
+
+  - job_name: vllm
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels: { serving: vllm }
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  - job_name: gpu
+    static_configs:
+      - targets: ["host.docker.internal:9835"]

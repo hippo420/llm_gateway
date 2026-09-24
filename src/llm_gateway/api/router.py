@@ -19,5 +19,5 @@ v1_router.include_router(models.router)
 ops_router = APIRouter()
 ops_router.include_router(health.router)
 
-# Phase 2: /metrics 는 prometheus_client 의 ASGI app 을 main 에서 mount 한다.
+# /metrics 는 main.create_app() 이 settings.metrics_enabled 에 따라 붙인다.
 # Phase 4: admin_router (config 조회/reload/override) 가 여기 추가된다.

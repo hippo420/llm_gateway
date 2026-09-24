@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: llm-gateway
+    folder: LLM Gateway
+    type: file
+    # UI 에서 고친 것은 export 해서 dashboards/*.json 에 반영할 것. 안 하면 재기동 시 사라진다.
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

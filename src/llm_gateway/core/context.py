@@ -40,6 +40,8 @@ class RequestContext:
     deployment_id: str | None = None
     # 첫 content chunk 를 이미 내보냈는가 -> 재시도/폴백 차단 플래그 (Phase 6)
     stream_started: bool = False
+    # errors_total 을 이미 기록했는가 -> 에러 핸들러의 이중 기록 방지 (Phase 2)
+    error_recorded: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 

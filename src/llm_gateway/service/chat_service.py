@@ -9,7 +9,7 @@
     (5) Resilience 래핑     [Phase 6]  <- 지금은 직접 호출
     (6) Adapter 호출        여기
     (7) 응답 정규화          여기
-    (8) 계측 기록           [Phase 2]  <- 자리만 잡아둔다
+    (8) 계측 기록           여기 (observability.metrics)
 
 **이 파일의 구조가 이후 모든 Phase를 좌우한다.**
 (4)(5)(8) 이 나중에 끼어들 자리를 지금 비워두는 것이 Phase 1 의 핵심 작업이다.
@@ -33,9 +33,15 @@ from ..adapters.base import (
 )
 from ..adapters.factory import AdapterFactory
 from ..core.context import RequestContext
-from ..core.errors import RequestCancelledError, UnsupportedParameterError
+from ..core.errors import (
+    GatewayError,
+    InternalError,
+    RequestCancelledError,
+    UnsupportedParameterError,
+)
 from ..core.logging import log_event
 from ..core.timing import ChatTimings, Stopwatch
+from ..observability import metrics
 from ..registry.models import ModelDeployment, ModelRegistry
 from ..schemas.chat import (
     ChatCompletionChoice,
@@ -87,8 +93,13 @@ class ChatService:
         async generator 는 첫 __anext__ 까지 아무것도 실행하지 않는다.
         그래서 선택을 이 동기 메서드로 떼어내 라우터가 먼저 호출한다.
         """
-        self._validate(request)
-        return self._select(request, ctx)
+        try:
+            self._validate(request)
+            return self._select(request, ctx)
+        except GatewayError as exc:
+            # deployment 가 없으므로 requests_total 은 올리지 않는다. 에러 카운터만.
+            self._record_error(exc, ctx, model=self._model_label(request.model), deployment=None)
+            raise
 
     async def complete(
         self,
@@ -107,15 +118,18 @@ class ChatService:
         adapter_req = self._build_adapter_request(request, deployment)
 
         sw = Stopwatch().start()
-        try:
-            adapter_response = await self._aggregate_stream(adapter, adapter_req, sw)
-        except asyncio.CancelledError:
-            self._log_cancelled(request, deployment, sw)
-            raise
+        with metrics.inflight_tracker(request.model, deployment.id):
+            try:
+                adapter_response = await self._aggregate_stream(adapter, adapter_req, sw)
+            except asyncio.CancelledError:
+                self._on_cancelled(request, deployment, ctx, sw, stream=False)
+                raise
+            except Exception as exc:
+                self._on_failed(request, deployment, ctx, exc, stream=False)
+                raise
         timings = self._merge_timings(sw.finish(), adapter_response.timings)
 
-        # Phase 2: 여기서 record_request(...) 를 부른다. 값은 전부 준비되어 있다.
-        self._log_completed(request, deployment, adapter_response, timings, stream=False)
+        self._on_completed(request, deployment, adapter_response, timings, stream=False)
 
         return ChatResult(
             response=self._to_openai_response(adapter_response, request, ctx),
@@ -143,38 +157,43 @@ class ChatService:
         created = int(time.time())
         sw = Stopwatch().start()
 
-        # OpenAI 스트림의 첫 chunk 는 role 만 담는다. 여기에는 content 가 없으므로
-        # TTFT 로 세지 않는다.
-        yield ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=request.model,
-            choices=[
-                ChatCompletionChunkChoice(delta=ChatCompletionDelta(role="assistant"))
-            ],
-        )
-
         last_chunk: AdapterChatChunk | None = None
-        try:
-            async for chunk in adapter.stream_chat(adapter_req):
-                if chunk.delta:
-                    # 비어있지 않은 첫 delta 만 TTFT 기준이다.
-                    sw.mark_first_token()
-                    # Phase 6 의 재시도/폴백 차단 플래그. 한 글자라도 나갔으면 되돌릴 수 없다.
-                    ctx.stream_started = True
-                last_chunk = chunk
-                yield self._to_openai_chunk(chunk, request, completion_id, created)
-        except asyncio.CancelledError:
-            self._log_cancelled(request, deployment, sw)
-            raise
+        with metrics.inflight_tracker(request.model, deployment.id):
+            try:
+                # OpenAI 스트림의 첫 chunk 는 role 만 담는다. 여기에는 content 가 없으므로
+                # TTFT 로 세지 않는다.
+                yield ChatCompletionChunk(
+                    id=completion_id,
+                    created=created,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChunkChoice(delta=ChatCompletionDelta(role="assistant"))
+                    ],
+                )
+
+                async for chunk in adapter.stream_chat(adapter_req):
+                    if chunk.delta:
+                        # 비어있지 않은 첫 delta 만 TTFT 기준이다.
+                        sw.mark_first_token()
+                        # Phase 6 의 재시도/폴백 차단 플래그. 한 글자라도 나갔으면 되돌릴 수 없다.
+                        ctx.stream_started = True
+                    last_chunk = chunk
+                    yield self._to_openai_chunk(chunk, request, completion_id, created)
+            except (asyncio.CancelledError, GeneratorExit):
+                # 클라이언트가 yield 대기 중에 끊으면 CancelledError 가 아니라
+                # 제너레이터 aclose() 의 GeneratorExit 로 들어온다. 둘 다 이탈이다.
+                self._on_cancelled(request, deployment, ctx, sw, stream=True)
+                raise
+            except Exception as exc:
+                self._on_failed(request, deployment, ctx, exc, stream=True)
+                raise
 
         timings = self._merge_timings(
             sw.finish(), last_chunk.timings if last_chunk else None
         )
         usage = last_chunk.usage if last_chunk else None
 
-        # Phase 2: 여기서 record_request(...) 를 부른다.
-        self._log_completed(
+        self._on_completed(
             request,
             deployment,
             AdapterChatResponse(
@@ -350,7 +369,10 @@ class ChatService:
             load_sec=upstream.load_sec,
         )
 
-    def _log_completed(
+    # ── 계측 (Phase 2) ──────────────────────────────────────────
+    # 요청 하나당 아래 셋 중 정확히 하나가 불린다.
+
+    def _on_completed(
         self,
         request: ChatCompletionRequest,
         deployment: ModelDeployment,
@@ -359,7 +381,7 @@ class ChatService:
         *,
         stream: bool,
     ) -> None:
-        """요청당 LLM 요약 로그. 프롬프트/응답 원문은 넣지 않는다."""
+        """요청당 LLM 요약 로그 1줄 + metric. 프롬프트/응답 원문은 넣지 않는다."""
         usage = adapter_response.usage
         log_event(
             log,
@@ -369,6 +391,7 @@ class ChatService:
             adapter=deployment.adapter,
             upstream_model=deployment.upstream_model,
             stream=stream,
+            status=metrics.STATUS_SUCCESS,
             finish_reason=adapter_response.finish_reason,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
@@ -376,17 +399,62 @@ class ChatService:
             total_sec=_round(timings.total_sec),
             ttft_sec=_round(timings.ttft_sec),
             generation_sec=_round(timings.generation_sec),
+            queue_sec=_round(timings.queue_sec),
+            prompt_eval_sec=_round(timings.prompt_eval_sec),
             load_sec=_round(timings.load_sec),
             output_tps=_round(timings.output_tps(usage.output_tokens)),
         )
+        metrics.record_request(
+            model=request.model,
+            deployment_id=deployment.id,
+            adapter=deployment.adapter,
+            stream=stream,
+            status=metrics.STATUS_SUCCESS,
+            timings=timings,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            token_source=usage.source,
+            finish_reason=adapter_response.finish_reason,
+        )
 
-    def _log_cancelled(
+    def _on_failed(
         self,
         request: ChatCompletionRequest,
         deployment: ModelDeployment,
-        stopwatch: Stopwatch,
+        ctx: RequestContext,
+        exc: Exception,
+        *,
+        stream: bool,
     ) -> None:
-        """클라이언트 이탈. 실패가 아니라 별도 사유로 센다 (GW-4007)."""
+        """adapter 호출 실패. 로그는 에러 핸들러/SSE 인코더가 남기므로 metric 만 기록한다."""
+        error = exc if isinstance(exc, GatewayError) else InternalError("internal error")
+        self._record_error(error, ctx, model=request.model, deployment=deployment)
+        metrics.record_request(
+            model=request.model,
+            deployment_id=deployment.id,
+            adapter=deployment.adapter,
+            stream=stream,
+            status=metrics.STATUS_ERROR,
+            timings=None,
+            input_tokens=None,
+            output_tokens=None,
+            token_source="",
+            finish_reason="error",
+        )
+
+    def _on_cancelled(
+        self,
+        request: ChatCompletionRequest,
+        deployment: ModelDeployment,
+        ctx: RequestContext,
+        stopwatch: Stopwatch,
+        *,
+        stream: bool,
+    ) -> None:
+        """클라이언트 이탈. 실패가 아니라 별도 사유로 센다 (GW-4007).
+
+        error rate 에 섞이지 않도록 status="cancelled" 로 기록한다.
+        """
         cancelled = RequestCancelledError("client closed the connection")
         log_event(
             log,
@@ -394,10 +462,49 @@ class ChatService:
             level=logging.WARNING,
             model=request.model,
             deployment_id=deployment.id,
+            stream=stream,
+            status=metrics.STATUS_CANCELLED,
             code=cancelled.code,
             error_type=str(cancelled.error_type),
             elapsed_sec=_round(stopwatch.elapsed_sec),
         )
+        self._record_error(cancelled, ctx, model=request.model, deployment=deployment)
+        metrics.record_request(
+            model=request.model,
+            deployment_id=deployment.id,
+            adapter=deployment.adapter,
+            stream=stream,
+            status=metrics.STATUS_CANCELLED,
+            timings=None,
+            input_tokens=None,
+            output_tokens=None,
+            token_source="",
+            finish_reason="cancelled",
+        )
+
+    @staticmethod
+    def _record_error(
+        error: GatewayError,
+        ctx: RequestContext,
+        *,
+        model: str | None,
+        deployment: ModelDeployment | None,
+    ) -> None:
+        """errors_total 증가 + 기록했다는 표시.
+
+        표시가 없으면 main.gateway_error_handler 가 같은 에러를 한 번 더 센다.
+        """
+        metrics.record_error(
+            model=model,
+            deployment_id=deployment.id if deployment else None,
+            error_type=str(error.error_type),
+            code=error.code,
+        )
+        ctx.error_recorded = True
+
+    def _model_label(self, requested: str) -> str | None:
+        """클라이언트가 보낸 모델명은 등록된 것일 때만 label 로 쓴다 (자유 문자열 금지)."""
+        return requested if requested in self._registry.snapshot.models else None
 
 
 def _completion_id(ctx: RequestContext) -> str:

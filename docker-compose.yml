@@ -1,0 +1,53 @@
+# Phase 2 관측 스택. docs/operations/observability-stack.md
+#
+#   docker compose up -d                    prometheus + grafana + node-exporter
+#   docker compose --profile gpu up -d      + nvidia exporter (컨테이너 GPU 접근이 될 때)
+#
+# Gateway / Ollama 는 호스트(Windows)에서 돈다. 컨테이너에서는 host.docker.internal 로 닿는다.
+#
+# 호스트 포트는 환경변수로 바꿀 수 있다. Windows 는 Hyper-V/WinNAT 가 포트 대역을 예약해서
+# 3000 같은 포트가 막혀 있을 수 있다 (`netsh interface ipv4 show excludedportrange protocol=tcp`).
+#   GRAFANA_PORT=3300 docker compose up -d
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+
+  # Docker Desktop 에서는 Windows 가 아니라 WSL VM 의 CPU/RAM 을 보여준다.
+  # 호스트 자체 지표가 필요하면 windows_exporter(:9182) 를 호스트에 띄울 것.
+  node-exporter:
+    image: prom/node-exporter:latest
+    ports: ["9100:9100"]
+
+  # WSL 에서 컨테이너 GPU 접근이 안 되면 이 서비스 대신 Windows 용 바이너리를
+  # 호스트에서 :9835 로 띄운다. prometheus 는 어느 쪽이든 host.docker.internal:9835 를 긁는다.
+  nvidia-exporter:
+    image: utkuozdemir/nvidia_gpu_exporter:latest
+    profiles: [gpu]
+    ports: ["9835:9835"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
+
+volumes:
+  prometheus-data:
+  grafana-data:

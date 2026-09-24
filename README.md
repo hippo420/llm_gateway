@@ -15,15 +15,15 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 1 구현 완료.** (Spring 앱 연결 확인만 미실시)
+**Phase 2 구현 완료.** (OpenTelemetry / Spring 쪽 `X-Request-Id` 전파 / baseline 축적은 남음)
 
-- `pytest` 49개 통과 — **실제 Ollama 없이 돈다**
-- 남아 있는 `NotImplementedError` 는 Phase 2(metrics) / Phase 4(Redis config) 자리표시자뿐
+- `pytest` 65개 통과 — **실제 Ollama 없이 돈다**
+- `GET /metrics` 로 L1/L2 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 4종)
+- 남아 있는 `NotImplementedError` 는 Phase 4(Redis config) 자리표시자뿐
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
-  [`docs/phases/phase-01-implementation.md`](docs/phases/phase-01-implementation.md)
+  [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md)
 
-다음 작업은 Phase 2 (계측). `ChatService` 의 `# Phase 2:` 주석 지점에
-metric 기록을 추가하면 된다 — 값은 이미 계산되어 있다.
+다음 작업은 **지표 축적** (Phase 3 진입 조건: 최소 2주치 + baseline 문서화).
 
 ---
 
@@ -63,6 +63,16 @@ uvicorn llm_gateway.main:app --host 0.0.0.0 --port 8080 --reload
 python -m llm_gateway.main
 ```
 
+### 관측 스택 (Phase 2)
+
+```bash
+docker compose up -d                  # Prometheus :9090 / Grafana :3000 (admin/admin)
+docker compose --profile gpu up -d    # + GPU exporter
+curl localhost:8080/metrics
+```
+
+포트 충돌 / Windows 포트 예약 / WSL GPU 주의사항: [observability-stack.md](docs/operations/observability-stack.md)
+
 ### 테스트
 
 ```bash
@@ -89,7 +99,9 @@ src/llm_gateway/
 ├── registry/                Model Registry, Config loader
 ├── adapters/                LLMAdapter ABC + Ollama 구현
 ├── service/                 ChatService (오케스트레이션)
-└── observability/           Metrics (Phase 2)
+└── observability/           Prometheus metrics (Phase 2)
+observability/               prometheus.yml, Grafana provisioning + 대시보드 JSON
+docker-compose.yml           관측 스택
 ```
 
 요청 흐름:

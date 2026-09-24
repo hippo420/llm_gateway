@@ -22,6 +22,7 @@ from .core.errors import GatewayError, InternalError, InvalidRequestError
 from .core.logging import configure_logging, log_event
 from .middleware.access_log import AccessLogMiddleware
 from .middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
+from .observability.metrics import metrics_endpoint, record_error
 from .registry.loader import YamlConfigSource
 from .registry.models import ModelRegistry
 from .service.chat_service import ChatService
@@ -88,7 +89,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)
 
-    # Phase 2: settings.metrics_enabled 면 app.mount("/metrics", metrics_asgi_app()).
+    # 인증 없음. Prometheus 가 직접 긁는다. 외부 노출은 네트워크 단에서 막을 것.
+    if settings.metrics_enabled:
+        app.add_route("/metrics", metrics_endpoint, methods=["GET"], include_in_schema=False)
 
     return app
 
@@ -109,7 +112,19 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
         detail=exc.detail,
     )
 
-    # Phase 2: record_error(exc, ...) 를 여기서 부른다.
+    # ChatService 가 이미 센 에러는 건너뛴다. 여기서 세는 것은 인증 / 본문 검증처럼
+    # 서비스에 닿기 전에 난 에러다.
+    ctx = getattr(request.state, "ctx", None)
+    if ctx is None or not ctx.error_recorded:
+        record_error(
+            model=ctx.model if ctx is not None else None,
+            deployment_id=ctx.deployment_id if ctx is not None else None,
+            error_type=str(exc.error_type),
+            code=exc.code,
+        )
+        if ctx is not None:
+            ctx.error_recorded = True
+
     return JSONResponse(
         status_code=exc.http_status,
         content=exc.to_error_body(request_id),
