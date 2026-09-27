@@ -1,0 +1,1 @@
+"""Pure deployment selection strategies."""

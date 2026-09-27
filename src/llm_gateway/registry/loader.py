@@ -31,6 +31,7 @@ from ..core.errors import (
     DuplicateDeploymentIdError,
 )
 from ..core.logging import log_event
+from ..routing.config import RoutingConfig
 from .models import (
     GenerationOptions,
     ModelDeployment,
@@ -291,7 +292,7 @@ class GatewayConfig(BaseModel):
     version: int = 1
     defaults: RawDefaults = Field(default_factory=RawDefaults)
     models: dict[str, RawModel] = Field(min_length=1)
-    routing: dict[str, Any] = Field(default_factory=dict)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     resilience: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -364,10 +365,17 @@ def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> N
                     detail={"id": dep.id, **t.model_dump()},
                 )
 
-        # 에러가 아니라 경고다. Phase 1 은 첫 후보를 쓰지만,
-        # Phase 5 의 weighted routing 에서는 트래픽이 흐르지 않는 상태가 된다.
-        if not sum(d.weight for d in entry.deployments if d.enabled):
+        total_weight = sum(d.weight for d in entry.deployments if d.enabled)
+        if not total_weight:
             log_event(log, "config_zero_weight", level=logging.WARNING, model=name)
+        elif snapshot.routing.strategy == "weighted" and total_weight != 100:
+            log_event(
+                log,
+                "config_weights_normalized",
+                level=logging.WARNING,
+                model=name,
+                total_weight=total_weight,
+            )
 
 
 def _parse_yaml(raw: dict[str, Any]) -> RegistrySnapshot:
@@ -408,6 +416,6 @@ def _parse_yaml(raw: dict[str, Any]) -> RegistrySnapshot:
         models=models,
         defaults_timeout=defaults_timeout,
         defaults_options=defaults_options,
-        routing=raw.get("routing") or {},
+        routing=RoutingConfig.model_validate(raw.get("routing") or {}),
         resilience=raw.get("resilience") or {},
     )

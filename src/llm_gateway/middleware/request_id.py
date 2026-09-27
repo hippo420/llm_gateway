@@ -9,8 +9,6 @@ OpenTelemetry traceparent 는 Phase 2 후반. 먼저 이것부터 확실히 동�
 
 from __future__ import annotations
 
-import re
-
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -19,6 +17,7 @@ from ..core.context import (
     RequestContext,
     new_request_id,
     reset_request_context,
+    sanitize_header_value,
     set_request_context,
 )
 
@@ -26,29 +25,18 @@ REQUEST_ID_HEADER = "X-Request-Id"
 SESSION_ID_HEADER = "X-Session-Id"
 REQUEST_TYPE_HEADER = "X-Request-Type"
 
-MAX_HEADER_VALUE_LEN = 128
-# 외부에서 들어오는 값이다. 로그 오염/헤더 주입을 막기 위해 문자 집합을 좁힌다.
-_SAFE_VALUE = re.compile(rf"^[A-Za-z0-9._:@\-]{{1,{MAX_HEADER_VALUE_LEN}}}$")
-
-
-def _sanitize(value: str | None) -> str | None:
-    """허용 문자만으로 된 값이면 그대로, 아니면 None."""
-    if value is None:
-        return None
-    value = value.strip()
-    return value if _SAFE_VALUE.match(value) else None
-
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        request_id = _sanitize(request.headers.get(REQUEST_ID_HEADER)) or new_request_id()
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        request_id = (
+            sanitize_header_value(request.headers.get(REQUEST_ID_HEADER)) or new_request_id()
+        )
 
         ctx = RequestContext(
             request_id=request_id,
-            session_id=_sanitize(request.headers.get(SESSION_ID_HEADER)),
-            request_type=_sanitize(request.headers.get(REQUEST_TYPE_HEADER)),
+            session_id=sanitize_header_value(request.headers.get(SESSION_ID_HEADER)),
+            user_bucket=sanitize_header_value(request.headers.get("X-User-Bucket")),
+            request_type=sanitize_header_value(request.headers.get(REQUEST_TYPE_HEADER)),
         )
         # 라우터는 request.state.ctx 로, 로깅은 contextvar 로 꺼내 쓴다.
         request.state.ctx = ctx

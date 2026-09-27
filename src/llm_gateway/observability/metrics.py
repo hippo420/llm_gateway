@@ -57,6 +57,17 @@ NO_DEPLOYMENT: Final = "none"
 # 오타 하나마다 시계열이 생긴다 (= 자유 문자열 금지 규칙).
 UNKNOWN_MODEL: Final = "unknown"
 
+ROUTING_DECISIONS = Counter(
+    "llm_gateway_routing_decision_total",
+    "Initial deployment selections, before calling the upstream.",
+    ["model", "deployment_id", "strategy"],
+)
+ROUTING_NO_CANDIDATE = Counter(
+    "llm_gateway_routing_no_candidate_total",
+    "Routing attempts without an eligible deployment for a registered model.",
+    ["model"],
+)
+
 STATUS_SUCCESS: Final = "success"
 STATUS_ERROR: Final = "error"
 # 클라이언트 이탈. 실패가 아니므로 error rate 에서 빠지도록 따로 둔다 (GW-4007).

@@ -44,7 +44,7 @@ async def chat_completions(
 ) -> JSONResponse | StreamingResponse:
     # 검증과 deployment 선택은 본문을 흘리기 전에 끝낸다.
     # StreamingResponse 는 헤더를 첫 바이트 전에 확정해야 하기 때문이다.
-    deployment = service.prepare(request, ctx)
+    deployment = service.prepare(request, ctx, http_request.headers)
 
     if request.stream:
         return StreamingResponse(
@@ -69,7 +69,7 @@ async def chat_stream(
 ) -> StreamingResponse:
     """stream 값과 무관하게 SSE 로 응답한다."""
     request.stream = True
-    deployment = service.prepare(request, ctx)
+    deployment = service.prepare(request, ctx, http_request.headers)
     return StreamingResponse(
         _sse(service.stream(request, ctx, deployment), ctx),
         media_type=SSE_MEDIA_TYPE,

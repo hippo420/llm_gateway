@@ -15,18 +15,20 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 4 코드 구현 완료.** (실제 Redis/Ollama 운영 검증 및 Phase 3 실측 baseline/오탐 관찰은 남음)
+**Phase 5 필수 범위(Static/Weighted 라우터) 코드 구현 완료.** 실제 환경의 분배/성능 실측 및 Phase 3 baseline 검증은 남아 있다.
 
 - `pytest` — **실제 Ollama 없이 돈다** (R1~R6 진단 재현 테스트 포함)
-- `GET /metrics` 로 L1/L2 및 설정 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 6종)
+- `GET /metrics` 로 L1/L2·설정·라우팅 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 7종)
 - `GET /admin/diagnosis`로 규칙 기반 진단 조회. baseline 설정 후 `GATEWAY_DIAGNOSIS_ENABLED=true`
 - YAML 감시, Redis 임시 override/TTL/pub-sub, 검증 후 무중단 설정 교체
+- 세션 해시 기반 Weighted 분배, 선택 이유/대체 후보 보존, Redis weight/disable 즉시 반영
 - `/admin/config`에서 유효 설정 조회. 모든 `/admin` API는 `GATEWAY_API_KEY` 설정 및 Bearer 인증 필수
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
   [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md) ·
-  [Phase 3](docs/phases/phase-03-implementation.md) · [Phase 4](docs/phases/phase-04-implementation.md)
+  [Phase 3](docs/phases/phase-03-implementation.md) · [Phase 4](docs/phases/phase-04-implementation.md) ·
+  [Phase 5](docs/phases/phase-05-implementation.md)
 
-다음 구현은 **Phase 5 모델 라우터**다. 실측 baseline 설정 및 운영 검증도 별도로 남아 있다.
+다음 구현은 **Phase 6 복원력(Retry/Fallback/Circuit Breaker)**이다.
 
 ---
 
@@ -102,6 +104,17 @@ Gateway를 시작한다. Redis 없이도 YAML 감시/조회/수동 reload는 사
 `ttl_sec`는 기본 3600초(최대 86400초)다. 상세 예제와 장애 동작은
 [Phase 4 구현 기록](docs/phases/phase-04-implementation.md)을 참고한다.
 
+### 모델 라우팅 (Phase 5)
+
+`config/gateway.yaml`에서 `routing.strategy: weighted`로 설정하고, **같은 논리 모델**의
+deployment에 `weight: 80` / `weight: 20`을 지정한다. 기본 `static`은 기존처럼 첫 enabled
+deployment를 선택한다. Weighted는 enabled이며 weight가 양수인 배포만 사용한다.
+
+동일 `X-Session-Id`는 동일 모델·후보·가중치에서 같은 배포로 간다. 세션 헤더가 없으면
+`X-User-Bucket`, 이후 request_id를 사용한다. weight/enable 변경 시 세션 배정은 바뀔 수 있다.
+Grafana `LLM Gateway / Routing`에서 분배와 deployment별 TTFT/TPS를 비교한다.
+전체 예제와 검증 범위는 [Phase 5 구현 기록](docs/phases/phase-05-implementation.md)을 참고한다.
+
 ---
 
 ## 구조
@@ -116,6 +129,7 @@ src/llm_gateway/
 ├── core/                    context / errors / logging / timing
 ├── middleware/              request_id, access log
 ├── registry/                Model Registry, Config loader
+├── routing/                 ModelRouter, Static/Weighted, RoutingDecision
 ├── adapters/                LLMAdapter ABC + Ollama 구현
 ├── service/                 ChatService (오케스트레이션)
 └── observability/           Prometheus metrics (Phase 2)
@@ -127,7 +141,7 @@ docker-compose.yml           관측 스택
 
 ```text
 RequestIdMiddleware → AccessLogMiddleware → chat route
-   → ChatService.prepare()   검증 + deployment 선택 (스트림 시작 전)
+   → ChatService.prepare()   검증 + ModelRouter 선택 (스트림 시작 전)
    → ChatService.complete()  내부 streaming 집계 → TTFT 확보
    → OllamaAdapter           NDJSON 파싱 / 나노초 → 초 / 예외 → GatewayError
    → 응답 정규화 + chat_completed 로그

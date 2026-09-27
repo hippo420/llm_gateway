@@ -159,12 +159,12 @@ class TestYamlConfigSource:
 
 
 class TestModelRegistry:
-    def test_resolve_returns_enabled_deployment(self, registry):
-        assert registry.resolve("qwen-7b").id == "qwen-7b@fake"
+    def test_candidates_return_enabled_deployment(self, registry):
+        assert registry.candidates("qwen-7b")[0].id == "qwen-7b@fake"
 
     def test_unknown_model_raises_gw4001(self, registry):
         with pytest.raises(ModelNotFoundError) as exc:
-            registry.resolve("qwen-70b")
+            registry.candidates("qwen-70b")[0]
 
         assert exc.value.code == "GW-4001"
         assert exc.value.http_status == 404

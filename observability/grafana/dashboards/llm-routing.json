@@ -1,0 +1,49 @@
+{
+  "uid": "llm-routing",
+  "title": "LLM Gateway / Routing",
+  "tags": ["llm-gateway", "routing"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Deployment selection share",
+      "description": "Initial routing decisions, grouped by model and Gateway instance. Weights describe session buckets; unequal session traffic can skew request shares. No traffic produces no data.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, model, deployment_id) (rate(llm_gateway_routing_decision_total[$__rate_interval])) / ignoring (deployment_id) group_left sum by (job, instance, model) (rate(llm_gateway_routing_decision_total[$__rate_interval]))", "legendFormat": "{{job}} / {{instance}} / {{model}} / {{deployment_id}}"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Routing decisions per second",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, model, deployment_id, strategy) (rate(llm_gateway_routing_decision_total[$__rate_interval]))", "legendFormat": "{{job}} / {{instance}} / {{model}} / {{deployment_id}} / {{strategy}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "TTFT P95 by deployment",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (job, instance, le, model, deployment_id) (rate(llm_gateway_ttft_seconds_bucket[$__rate_interval])))", "legendFormat": "{{job}} / {{instance}} / {{model}} / {{deployment_id}}"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Mean output tokens/sec by deployment",
+      "description": "Mean of measured per-request output throughput. Missing timing or token usage remains missing.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, model, deployment_id) (rate(llm_gateway_output_tokens_per_second_sum[$__rate_interval])) / sum by (job, instance, model, deployment_id) (rate(llm_gateway_output_tokens_per_second_count[$__rate_interval]))", "legendFormat": "{{job}} / {{instance}} / {{model}} / {{deployment_id}}"}]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Requests without eligible candidates (5m)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 16, "w": 24, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, model) (increase(llm_gateway_routing_no_candidate_total[5m]))", "legendFormat": "{{job}} / {{instance}} / {{model}}"}]
+    }
+  ]
+}

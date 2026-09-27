@@ -41,7 +41,7 @@
     },
     {
       "id": 5, "type": "table", "title": "Deployment weight",
-      "description": "Configured weight; routing remains first enabled candidate until Phase 5.",
+      "description": "Relative weight for the weighted strategy. Static selects the first enabled candidate regardless of weight.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
       "targets": [{"refId": "A", "expr": "llm_gateway_deployment_weight", "instant": true, "format": "table"}]

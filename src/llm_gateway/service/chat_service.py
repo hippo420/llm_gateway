@@ -4,8 +4,8 @@
 
     (1) HTTP 수신          -> route
     (2) RequestContext     -> middleware
-    (3) Registry 조회       resolve/candidates
-    (4) Router 선택         [Phase 5]  <- 지금은 registry.resolve() 가 대신한다
+    (3) Registry 조회       candidates
+    (4) Router 선택         ModelRouter (Static / Weighted)
     (5) Resilience 래핑     [Phase 6]  <- 지금은 직접 호출
     (6) Adapter 호출        여기
     (7) 응답 정규화          여기
@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from ..adapters.base import (
@@ -33,7 +33,7 @@ from ..adapters.base import (
     LLMAdapter,
 )
 from ..adapters.factory import AdapterFactory
-from ..core.context import RequestContext
+from ..core.context import RequestContext, sanitize_header_value
 from ..core.errors import (
     GatewayError,
     InternalError,
@@ -45,6 +45,8 @@ from ..core.logging import log_event
 from ..core.timing import ChatTimings, Stopwatch
 from ..observability import metrics
 from ..registry.models import ModelDeployment, ModelRegistry
+from ..routing.decision import RoutingContext
+from ..routing.router import ModelRouter
 from ..schemas.chat import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -83,10 +85,16 @@ class ChatService:
     def __init__(self, registry: ModelRegistry, adapters: AdapterFactory) -> None:
         self._registry = registry
         self._adapters = adapters
+        self._router = ModelRouter(registry)
 
     # ── 공개 API ────────────────────────────────────────────────
 
-    def prepare(self, request: ChatCompletionRequest, ctx: RequestContext) -> ModelDeployment:
+    def prepare(
+        self,
+        request: ChatCompletionRequest,
+        ctx: RequestContext,
+        headers: Mapping[str, str] | None = None,
+    ) -> ModelDeployment:
         """검증 + deployment 선택. **본문을 흘리기 전에** 끝나야 하는 일이다.
 
         streaming 응답의 헤더(X-Gateway-Deployment)는 첫 바이트 전에 확정되어야 하는데,
@@ -95,7 +103,7 @@ class ChatService:
         """
         try:
             self._validate(request)
-            return self._select(request, ctx)
+            return self._select(request, ctx, headers)
         except GatewayError as exc:
             # deployment 가 없으므로 requests_total 은 올리지 않는다. 에러 카운터만.
             self._record_error(exc, ctx, model=self._model_label(request.model), deployment=None)
@@ -231,13 +239,38 @@ class ChatService:
             )
         _output_format(request)  # json_schema 형식 오류를 adapter 호출 전에 GW-4000 으로
 
-    def _select(self, request: ChatCompletionRequest, ctx: RequestContext) -> ModelDeployment:
-        """논리 모델 -> deployment.
-
-        Phase 5 에서 이 메서드 내부만 ModelRouter 호출로 교체된다.
-        **호출부는 바뀌지 않아야 한다.** 그래서 별도 메서드로 분리해둔다.
-        """
-        deployment = self._registry.resolve(request.model)
+    def _select(
+        self,
+        request: ChatCompletionRequest,
+        ctx: RequestContext,
+        headers: Mapping[str, str] | None = None,
+    ) -> ModelDeployment:
+        snapshot = self._registry.snapshot
+        header_name = snapshot.routing.bucket_header.lower()
+        if headers is not None:
+            hints = {key.lower(): value for key, value in headers.items()}
+            primary = sanitize_header_value(hints.get(header_name))
+            user_bucket = sanitize_header_value(hints.get("x-user-bucket"))
+        else:
+            primary = (
+                sanitize_header_value(ctx.session_id) if header_name == "x-session-id" else None
+            )
+            user_bucket = sanitize_header_value(ctx.user_bucket)
+        bucket_key = primary or user_bucket or ctx.request_id
+        source = "primary_header" if primary else "user_bucket" if user_bucket else "request_id"
+        decision = self._router.route(
+            RoutingContext(
+                model=request.model,
+                bucket_key=bucket_key,
+                bucket_source=source,
+                request_type=ctx.request_type,
+                estimated_input_tokens=(sum(len(m.content) for m in request.messages) + 3) // 4,
+                max_tokens=request.max_tokens,
+            ),
+            snapshot=snapshot,
+        )
+        deployment = decision.deployment
+        ctx.routing_decision = decision
         ctx.model = request.model
         ctx.deployment_id = deployment.id
         return deployment

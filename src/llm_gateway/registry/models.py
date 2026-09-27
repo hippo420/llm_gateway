@@ -1,8 +1,7 @@
 """Model Registry - 논리 모델명을 물리 deployment 로 해석한다.
 
 이 계층이 있어서 Spring 이 endpoint/서빙 프레임워크를 모를 수 있다.
-Phase 1 에서는 후보 중 첫 번째를 쓰지만, **인터페이스는 처음부터 복수 후보**를 반환한다.
-그래야 Phase 5(Router)에서 시그니처를 바꾸지 않는다.
+활성 후보 목록을 반환하고, 단일 deployment 선택은 ModelRouter가 담당한다.
 
 명세: docs/specs/config-spec.md
 """
@@ -14,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ModelNotFoundError, NoAvailableDeploymentError
+from ..routing.config import RoutingConfig
 
 
 def _override_fields(override: BaseModel | dict[str, Any] | None) -> dict[str, Any]:
@@ -72,7 +72,7 @@ class ModelDeployment(BaseModel):
     endpoint: str
     upstream_model: str  # 실제 서빙되는 모델명
     enabled: bool = True
-    weight: int = Field(default=100, ge=0, le=100)  # Phase 5 부터 사용
+    weight: int = Field(default=100, ge=0, le=100)  # weighted 전략의 상대 가중치
     timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     options: GenerationOptions = Field(default_factory=GenerationOptions)
     # adapter 고유 옵션 (예: ollama keep_alive). 남용하면 추상화가 무너진다.
@@ -105,15 +105,15 @@ class RegistrySnapshot(BaseModel):
     models: dict[str, ModelEntry] = Field(default_factory=dict)
     defaults_timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     defaults_options: GenerationOptions = Field(default_factory=GenerationOptions)
-    # Phase 5/6 에서 사용할 원본 설정 블록
-    routing: dict[str, Any] = Field(default_factory=dict)
+    # Routing은 현재 정책, resilience는 Phase 6용 원본 설정 블록.
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     resilience: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelRegistry:
     """스냅샷을 들고 조회를 제공한다.
 
-    Phase 4 에서 여기에 reload / watch 가 붙는다. 조회 시그니처는 바뀌지 않아야 한다.
+    ConfigManager가 검증된 스냅샷을 교체하고 ModelRouter가 후보를 선택한다.
     """
 
     def __init__(self, snapshot: RegistrySnapshot) -> None:
@@ -130,12 +130,17 @@ class ModelRegistry:
         """
         self._snapshot = snapshot
 
-    def candidates(self, logical_model: str) -> list[ModelDeployment]:
+    def candidates(
+        self,
+        logical_model: str,
+        *,
+        snapshot: RegistrySnapshot | None = None,
+    ) -> list[ModelDeployment]:
         """논리 모델의 **활성 후보 전체**를 반환한다.
 
         Phase 6 에서는 circuit breaker 가 OPEN 인 것도 여기서 제외하게 된다.
         """
-        entry = self._snapshot.models.get(logical_model)
+        entry = (snapshot or self._snapshot).models.get(logical_model)
         if entry is None:
             raise ModelNotFoundError(
                 f"model '{logical_model}' is not registered",
@@ -149,14 +154,6 @@ class ModelRegistry:
                 detail={"model": logical_model, "total": len(entry.deployments)},
             )
         return enabled
-
-    def resolve(self, logical_model: str) -> ModelDeployment:
-        """단일 deployment 선택 (Phase 1 임시). 후보의 첫 번째를 쓴다.
-
-        Phase 5 에서 이 메서드는 **삭제**되고 ModelRouter 가 대체한다.
-        따라서 호출부를 늘리지 말 것 (ChatService 한 곳에서만 쓴다).
-        """
-        return self.candidates(logical_model)[0]
 
     def list_models(self) -> list[ModelEntry]:
         """GET /v1/models 용. disabled deployment 도 포함해서 보여준다."""

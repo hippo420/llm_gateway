@@ -194,7 +194,7 @@ async def test_request_over_override_over_yaml(system):
         },
     )
     assert response.status_code == 200
-    deployment = manager.registry.resolve("qwen-7b")
+    deployment = manager.registry.candidates("qwen-7b")[0]
     assert deployment.timeout.connect == 5
     assert deployment.timeout.read == 90
     assert deployment.options.top_p == 0.9
@@ -308,7 +308,7 @@ async def test_redis_outage_retains_override_until_original_expiry(system, monke
         }
     )
     await manager.reload()
-    assert manager.registry.resolve("qwen-7b").enabled
+    assert manager.registry.candidates("qwen-7b")[0].enabled
 
 
 async def test_invalid_redis_document_retains_snapshot(system):
@@ -330,7 +330,7 @@ async def test_ttl_expiry_returns_to_yaml_without_pubsub(system):
         },
     )
     await redis.delete(RedisConfigSource.KEY)
-    applied = observe_reloads(manager, lambda: manager.registry.resolve("qwen-7b").enabled)
+    applied = observe_reloads(manager, lambda: manager.registry.candidates("qwen-7b")[0].enabled)
     # Poll only: no subscription can hide a missed notification.
     task = asyncio.create_task(manager.poll(0, 0.01))
     try:
@@ -338,7 +338,7 @@ async def test_ttl_expiry_returns_to_yaml_without_pubsub(system):
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-    assert manager.registry.resolve("qwen-7b").enabled
+    assert manager.registry.candidates("qwen-7b")[0].enabled
 
 
 async def test_pubsub_updates_another_manager(system):
@@ -354,7 +354,7 @@ async def test_pubsub_updates_another_manager(system):
     async def reload(trigger="admin", **kwargs):
         result = await original_reload(trigger, **kwargs)
         ready.set()
-        if second.registry.resolve("qwen-7b").weight == 30:
+        if second.registry.candidates("qwen-7b")[0].weight == 30:
             updated.set()
         return result
 
@@ -385,7 +385,7 @@ async def test_watch_file_recovers_after_invalid_yaml(system):
         assert manager.registry.snapshot is old
         recovered = observe_reloads(
             manager,
-            lambda: manager.registry.resolve("qwen-7b").endpoint == "http://new-host:11434",
+            lambda: manager.registry.candidates("qwen-7b")[0].endpoint == "http://new-host:11434",
         )
         path.write_text(
             SAMPLE.replace("http://localhost:11434", "http://new-host:11434"), encoding="utf-8"
@@ -521,7 +521,7 @@ async def test_timeout_only_reload_recreates_adapter_and_stream_close_drains(sys
     request = ChatCompletionRequest.model_validate({**BODY, "stream": True})
     stream = service.stream(request, RequestContext(request_id="stream"))
     await anext(stream)  # role chunk; lease must span this suspension
-    old = app.state.adapters.get(manager.registry.resolve("qwen-7b"))
+    old = app.state.adapters.get(manager.registry.candidates("qwen-7b")[0])
     closed = asyncio.Event()
 
     async def close():
@@ -530,7 +530,7 @@ async def test_timeout_only_reload_recreates_adapter_and_stream_close_drains(sys
     old.aclose = close
     path.write_text(SAMPLE.replace("read: 60", "read: 90"), encoding="utf-8")
     await manager.reload()
-    new = app.state.adapters.get(manager.registry.resolve("qwen-7b"))
+    new = app.state.adapters.get(manager.registry.candidates("qwen-7b")[0])
     assert new is not old
     assert new.deployment.timeout.read == 90
     assert not closed.is_set()
@@ -566,8 +566,8 @@ async def test_expired_entry_does_not_wait_for_other_entry_ttl(system):
     )
     await redis.set(RedisConfigSource.KEY, document.model_dump_json(), ex=3600)
     await manager.reload()
-    assert manager.registry.resolve("qwen-7b").enabled
-    assert manager.registry.resolve("second").weight == 30
+    assert manager.registry.candidates("qwen-7b")[0].enabled
+    assert manager.registry.candidates("second")[0].weight == 30
 
 
 async def test_failed_redis_write_retains_local_snapshot(system, monkeypatch):
@@ -597,13 +597,13 @@ async def test_redis_poll_respects_independent_file_watch_interval(system, file_
     task = asyncio.create_task(manager.poll(file_interval, 0.01))
     try:
         await asyncio.wait_for(polled.wait(), timeout=2)
-        assert manager.registry.resolve("qwen-7b").endpoint == "http://localhost:11434"
+        assert manager.registry.candidates("qwen-7b")[0].endpoint == "http://localhost:11434"
         assert (
             manager.sources()["base"]["models"]["qwen-7b"]["deployments"][0]["endpoint"]
             == "http://localhost:11434"
         )
         await manager.reload()
-        assert manager.registry.resolve("qwen-7b").endpoint == "http://pending:11434"
+        assert manager.registry.candidates("qwen-7b")[0].endpoint == "http://pending:11434"
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -658,7 +658,7 @@ async def test_invalid_or_missing_yaml_does_not_block_override_expiry(system, re
     task = asyncio.create_task(manager.poll(0.01, 0.01))
     try:
         await asyncio.wait_for(restored.wait(), timeout=2)
-        assert manager.registry.resolve("qwen-7b").endpoint == "http://localhost:11434"
+        assert manager.registry.candidates("qwen-7b")[0].endpoint == "http://localhost:11434"
         assert CONFIG_RELOAD.labels("poll", "failed")._value.get() > failures
         assert manager.source.base.is_stale()
     finally:
@@ -680,6 +680,6 @@ async def test_rejected_layer_merge_does_not_accept_file_mtime_or_raw(system):
     await redis.delete(RedisConfigSource.KEY)
     await manager.reload("poll", refresh_base=False)
     assert manager.sources()["base"] == accepted
-    assert manager.registry.resolve("qwen-7b").endpoint == "http://localhost:11434"
+    assert manager.registry.candidates("qwen-7b")[0].endpoint == "http://localhost:11434"
     await manager.reload()
-    assert manager.registry.resolve("qwen-7b").endpoint == "http://pending:11434"
+    assert manager.registry.candidates("qwen-7b")[0].endpoint == "http://pending:11434"
