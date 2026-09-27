@@ -14,6 +14,8 @@ from .common import Usage
 
 Role = Literal["system", "user", "assistant", "tool"]
 
+RESPONSE_FORMAT_TYPES = frozenset({"text", "json_object", "json_schema"})
+
 
 class ChatMessage(BaseModel):
     role: Role
@@ -35,12 +37,18 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     stop: list[str] | None = None
     seed: int | None = None
+    # structured output. {"type": "text" | "json_object" | "json_schema", "json_schema": {...}}
+    response_format: dict[str, Any] | None = None
+
+    # ── Gateway 확장 필드 (OpenAI 스펙에 없음) ──────────────────
+    # 컨텍스트 길이(토큰). Ollama 의 options.num_ctx 로 간다. 다른 adapter 는 무시한다.
+    # Ollama 기본값은 2048 이라, 지정하지 않으면 긴 프롬프트가 **경고 없이 잘린다.**
+    num_ctx: int | None = Field(default=None, ge=1)
 
     # OpenAI 스펙에 있으나 Gateway 가 아직 지원하지 않는 필드.
     # 조용히 무시하지 말고 GW-4002 로 거절하거나 경고 로그를 남긴다.
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any | None = None
-    response_format: dict[str, Any] | None = None
     n: int | None = None
 
     @field_validator("messages")
@@ -53,11 +61,11 @@ class ChatCompletionRequest(BaseModel):
 
     def unsupported_fields(self) -> list[str]:
         """설정된 미지원 필드 이름 목록. 비어 있으면 정상."""
-        fields = [
-            name
-            for name in ("tools", "tool_choice", "response_format")
-            if getattr(self, name) is not None
-        ]
+        fields = [name for name in ("tools", "tool_choice") if getattr(self, name) is not None]
+        if self.response_format is not None and self.response_format.get("type") not in (
+            RESPONSE_FORMAT_TYPES
+        ):
+            fields.append("response_format.type")
         # choices 를 하나만 만들기 때문에 n > 1 도 미지원이다.
         if self.n is not None and self.n > 1:
             fields.append("n")

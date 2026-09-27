@@ -15,15 +15,17 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 2 구현 완료.** (OpenTelemetry / Spring 쪽 `X-Request-Id` 전파 / baseline 축적은 남음)
+**Phase 3 코드 구현 완료.** (실측 baseline 설정 / 부하 재현 / 24시간 오탐 관찰은 남음)
 
-- `pytest` 65개 통과 — **실제 Ollama 없이 돈다**
-- `GET /metrics` 로 L1/L2 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 4종)
+- `pytest` — **실제 Ollama 없이 돈다** (R1~R6 진단 재현 테스트 포함)
+- `GET /metrics` 로 L1/L2 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 5종)
+- `GET /admin/diagnosis`로 규칙 기반 진단 조회. baseline 설정 후 `GATEWAY_DIAGNOSIS_ENABLED=true`
 - 남아 있는 `NotImplementedError` 는 Phase 4(Redis config) 자리표시자뿐
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
-  [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md)
+  [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md) ·
+  [Phase 3](docs/phases/phase-03-implementation.md)
 
-다음 작업은 **지표 축적** (Phase 3 진입 조건: 최소 2주치 + baseline 문서화).
+다음 작업은 **실측 baseline 설정 및 운영 검증** (최소 2주치 지표 + baseline 문서화).
 
 ---
 
@@ -39,6 +41,7 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 - [docs/specs/config-spec.md](docs/specs/config-spec.md) — 설정
 - [docs/specs/metrics-spec.md](docs/specs/metrics-spec.md) — Metric 이름/Label
 - [docs/specs/error-codes.md](docs/specs/error-codes.md) — 에러 코드
+- [spring/README.md](spring/README.md) — **Spring 앱(mony_batch) 쪽 작업** 단계별 가이드
 
 ---
 

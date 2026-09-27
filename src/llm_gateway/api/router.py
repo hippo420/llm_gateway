@@ -8,16 +8,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from .routes import chat, health, models
+from .routes import chat, diagnosis, health, models
 
 # OpenAI 호환 API
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(chat.router)
 v1_router.include_router(models.router)
 
-# 운영 엔드포인트 (인증 없음, prefix 없음)
+# 운영 엔드포인트 (health는 공개, diagnosis는 자체 Bearer dependency 적용)
 ops_router = APIRouter()
 ops_router.include_router(health.router)
+ops_router.include_router(diagnosis.router)
 
 # /metrics 는 main.create_app() 이 settings.metrics_enabled 에 따라 붙인다.
 # Phase 4: admin_router (config 조회/reload/override) 가 여기 추가된다.

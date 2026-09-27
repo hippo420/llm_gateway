@@ -36,10 +36,42 @@ models:
         extra:
           keep_alive: 30m           # cold start(진단 R6) 방지
 
-  # ── Phase 5 에서 활성화할 비교 대상 ────────────────────────────
-  qwen-14b:
-    description: "복잡한 리포트 분석용 (Phase 5 이후)"
+  # ── mony_batch 가 쓰는 모델 (spring/phase-01-gateway-connection.md G3) ──
+  # max_tokens 4096: Ollama 직접 호출 시절엔 출력 상한이 없었다. 2048 이면 긴 분석 JSON 이 잘린다.
+  # read 120: 첫 chunk 대기에도 걸린다. 14b 적재 + 8K 컨텍스트 prefill 을 60s 안에 못 끝낼 수 있다.
+  exaone-7.8b:
+    description: "mony_batch local 프로파일 기본 모델"
     deployments:
+      - id: exaone-7.8b@ollama
+        adapter: ollama
+        endpoint: http://[::1]:11434
+        upstream_model: exaone3.5:7.8b
+        enabled: true
+        weight: 100
+        timeout:
+          read: 120
+          total: 300
+        options:
+          max_tokens: 4096
+        extra:
+          keep_alive: 30m
+
+  qwen-14b:
+    description: "mony_batch dev/prod 기본 모델. vLLM deployment 는 Phase 5 비교 대상"
+    deployments:
+      - id: qwen-14b@ollama
+        adapter: ollama
+        endpoint: http://[::1]:11434
+        upstream_model: qwen2.5:14b
+        enabled: true
+        weight: 100
+        timeout:
+          read: 120
+          total: 300
+        options:
+          max_tokens: 4096
+        extra:
+          keep_alive: 30m
       - id: qwen-14b@vllm
         adapter: vllm
         endpoint: http://localhost:8000

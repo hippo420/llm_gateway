@@ -123,6 +123,27 @@ class TestPayloadMapping:
         assert payload["keep_alive"] == "30m"
         assert "keep_alive" not in payload.get("options", {})
 
+    def test_num_ctx_goes_to_options(self, adapter):
+        payload = adapter._build_payload(_request(num_ctx=8192), stream=True)
+
+        assert payload["options"]["num_ctx"] == 8192
+
+    def test_json_schema_becomes_format(self, adapter):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        payload = adapter._build_payload(
+            _request(json_output=True, json_schema=schema), stream=True
+        )
+
+        assert payload["format"] == schema
+
+    def test_json_output_without_schema_is_json_mode(self, adapter):
+        payload = adapter._build_payload(_request(json_output=True), stream=True)
+
+        assert payload["format"] == "json"
+
+    def test_no_format_by_default(self, adapter):
+        assert "format" not in adapter._build_payload(_request(), stream=True)
+
 
 class TestResponseMapping:
     def test_final_response_parsed(self, adapter):

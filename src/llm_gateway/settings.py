@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # --- observability (Phase 2) ---
     metrics_enabled: bool = True
 
+    # --- rule-based diagnosis (Phase 3) ---
+    diagnosis_enabled: bool = False
+    diagnosis_config_path: Path = Path("config/diagnosis.yaml")
+
     # --- dynamic config store (Phase 4) ---
     redis_url: str = ""
 

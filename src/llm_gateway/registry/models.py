@@ -45,6 +45,8 @@ class GenerationOptions(BaseModel):
     max_tokens: int | None = None
     stop: list[str] | None = None
     seed: int | None = None
+    # Ollama num_ctx. 모델별 기본값을 gateway.yaml 에 두고 요청이 덮어쓴다.
+    num_ctx: int | None = None
 
     def merged_with(
         self, override: GenerationOptions | dict[str, Any] | None

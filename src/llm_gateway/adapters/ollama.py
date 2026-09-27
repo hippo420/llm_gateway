@@ -183,6 +183,7 @@ class OllamaAdapter(LLMAdapter):
             ("num_predict", request.max_tokens),
             ("stop", request.stop),
             ("seed", request.seed),
+            ("num_ctx", request.num_ctx),
         ):
             if value is not None:
                 options[key] = value
@@ -194,6 +195,12 @@ class OllamaAdapter(LLMAdapter):
         }
         if options:
             payload["options"] = options
+
+        # structured output. 스키마를 주면 Ollama 가 그 모양 밖의 토큰을 생성하지 못한다.
+        if request.json_schema is not None:
+            payload["format"] = request.json_schema
+        elif request.json_output:
+            payload["format"] = "json"
 
         # cold start(진단 R6) 를 좌우하는 값이라 설정에서 조정할 수 있게 열어둔다.
         keep_alive = request.extra.get("keep_alive")

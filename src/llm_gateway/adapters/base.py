@@ -38,6 +38,12 @@ class AdapterChatRequest:
     max_tokens: int | None = None
     stop: list[str] | None = None
     seed: int | None = None
+    # 컨텍스트 길이(토큰). 서버 기동 시 고정되는 serving(vLLM)은 무시한다.
+    num_ctx: int | None = None
+    # structured output. json_schema 가 있으면 그 스키마로,
+    # 없고 json_output 이면 임의 JSON 으로 강제한다.
+    json_output: bool = False
+    json_schema: dict[str, Any] | None = None
     # adapter 고유 옵션 (예: ollama keep_alive).
     # 여러 adapter 가 공통으로 쓰기 시작하면 정식 필드로 승격할 것.
     extra: dict[str, Any] = field(default_factory=dict)

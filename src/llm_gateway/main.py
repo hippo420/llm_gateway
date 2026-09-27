@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,6 +21,9 @@ from .api.router import ops_router, v1_router
 from .core.context import current_request_id
 from .core.errors import GatewayError, InternalError, InvalidRequestError
 from .core.logging import configure_logging, log_event
+from .diagnosis.config import DiagnosisConfig
+from .diagnosis.engine import DiagnosisEngine, diagnosis_loop
+from .diagnosis.signals import PrometheusClient
 from .middleware.access_log import AccessLogMiddleware
 from .middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 from .observability.metrics import metrics_endpoint, record_error
@@ -57,12 +61,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         auth_enabled=settings.auth_enabled,
     )
 
-    # Phase 4: 여기서 config watcher task 를 띄운다.
-    yield
-
-    # 빠뜨리면 uvicorn 종료가 매달린다.
-    await app.state.adapters.close_all()
-    log_event(log, "gateway_stopped")
+    diagnosis_client: PrometheusClient | None = None
+    diagnosis_task: asyncio.Task | None = None
+    try:
+        if settings.diagnosis_enabled:
+            diagnosis_config = DiagnosisConfig.load(settings.diagnosis_config_path)
+            if not diagnosis_config.targets:
+                raise ValueError("diagnosis requires calibrated targets in diagnosis.yaml")
+            deployments = {d.id: d for d in app.state.registry.all_deployments()}
+            for target in diagnosis_config.targets:
+                deployment = deployments.get(target.deployment_id)
+                if deployment is None or deployment.logical_model != target.model:
+                    raise ValueError(f"unknown diagnosis target: {target.deployment_id}")
+            diagnosis_client = PrometheusClient(
+                diagnosis_config.prometheus_url,
+                timeout=diagnosis_config.query_timeout_sec,
+            )
+            engine = DiagnosisEngine(diagnosis_config, diagnosis_client)
+            app.state.diagnosis_engine = engine
+            diagnosis_task = asyncio.create_task(diagnosis_loop(engine), name="diagnosis")
+        app.state.diagnosis_task = diagnosis_task
+        yield
+    finally:
+        if diagnosis_task is not None:
+            diagnosis_task.cancel()
+            await asyncio.gather(diagnosis_task, return_exceptions=True)
+        if diagnosis_client is not None:
+            await diagnosis_client.close()
+        app.state.diagnosis_engine = None
+        await app.state.adapters.close_all()
+        log_event(log, "gateway_stopped")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -76,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     # lifespan 이 읽어야 하므로 조립 시점에 먼저 넣는다.
     app.state.settings = settings
+    app.state.diagnosis_engine = None
 
     app.include_router(v1_router)
     app.include_router(ops_router)

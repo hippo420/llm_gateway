@@ -111,6 +111,62 @@ class TestNonStreaming:
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "GW-4002"
 
+    async def test_unknown_response_format_type_returns_gw4002(self, client):
+        response = await client.post(
+            "/v1/chat/completions", json={**BODY, "response_format": {"type": "xml"}}
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "GW-4002"
+
+    async def test_json_schema_without_schema_returns_gw4000(self, client, fake_adapter):
+        response = await client.post(
+            "/v1/chat/completions",
+            json={**BODY, "response_format": {"type": "json_schema", "json_schema": {"name": "x"}}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "GW-4000"
+        assert fake_adapter.calls == []
+
+    async def test_json_schema_forwarded_to_adapter(self, client, fake_adapter):
+        schema = {"type": "object", "properties": {"topic": {"type": "string"}}}
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                **BODY,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "result", "schema": schema},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        call = fake_adapter.calls[0]
+        assert call.json_output is True
+        assert call.json_schema == schema
+
+    async def test_json_object_forwarded_as_json_mode(self, client, fake_adapter):
+        await client.post(
+            "/v1/chat/completions", json={**BODY, "response_format": {"type": "json_object"}}
+        )
+
+        call = fake_adapter.calls[0]
+        assert call.json_output is True
+        assert call.json_schema is None
+
+    async def test_num_ctx_forwarded(self, client, fake_adapter):
+        await client.post("/v1/chat/completions", json={**BODY, "num_ctx": 8192})
+
+        assert fake_adapter.calls[0].num_ctx == 8192
+
+    async def test_num_ctx_must_be_positive(self, client):
+        response = await client.post("/v1/chat/completions", json={**BODY, "num_ctx": 0})
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "GW-4000"
+
     async def test_deployment_defaults_applied(self, client, fake_adapter):
         """요청에서 temperature 를 생략하면 deployment 기본값이 adapter 까지 전달돼야 한다.
 

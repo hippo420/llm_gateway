@@ -21,6 +21,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 from ..adapters.base import (
     AdapterChatChunk,
@@ -36,6 +37,7 @@ from ..core.context import RequestContext
 from ..core.errors import (
     GatewayError,
     InternalError,
+    InvalidRequestError,
     RequestCancelledError,
     UnsupportedParameterError,
 )
@@ -221,6 +223,7 @@ class ChatService:
                 f"unsupported parameter(s): {', '.join(unsupported)}",
                 detail={"fields": unsupported},
             )
+        _output_format(request)  # json_schema 형식 오류를 adapter 호출 전에 GW-4000 으로
 
     def _select(
         self, request: ChatCompletionRequest, ctx: RequestContext
@@ -253,8 +256,10 @@ class ChatService:
                 "max_tokens": request.max_tokens,
                 "stop": request.stop,
                 "seed": request.seed,
+                "num_ctx": request.num_ctx,
             }
         )
+        json_output, json_schema = _output_format(request)
 
         return AdapterChatRequest(
             # 논리명이 아니라 upstream 모델명을 넣는다.
@@ -265,6 +270,9 @@ class ChatService:
             max_tokens=options.max_tokens,
             stop=options.stop,
             seed=options.seed,
+            num_ctx=options.num_ctx,
+            json_output=json_output,
+            json_schema=json_schema,
             extra=dict(deployment.extra),
         )
 
@@ -505,6 +513,27 @@ class ChatService:
     def _model_label(self, requested: str) -> str | None:
         """클라이언트가 보낸 모델명은 등록된 것일 때만 label 로 쓴다 (자유 문자열 금지)."""
         return requested if requested in self._registry.snapshot.models else None
+
+
+def _output_format(request: ChatCompletionRequest) -> tuple[bool, dict[str, Any] | None]:
+    """OpenAI response_format -> (json_output, json_schema).
+
+    {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}} 의 schema 만 꺼낸다.
+    """
+    fmt = request.response_format
+    if fmt is None or fmt.get("type") == "text":
+        return False, None
+    if fmt.get("type") == "json_object":
+        return True, None
+
+    spec = fmt.get("json_schema")
+    schema = spec.get("schema") if isinstance(spec, dict) else None
+    if not isinstance(schema, dict):
+        raise InvalidRequestError(
+            "response_format.json_schema.schema must be an object",
+            detail={"fields": ["response_format.json_schema.schema"]},
+        )
+    return True, schema
 
 
 def _completion_id(ctx: RequestContext) -> str:

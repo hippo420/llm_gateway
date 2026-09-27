@@ -1,0 +1,42 @@
+{
+  "uid": "llm-diagnosis",
+  "title": "LLM Gateway / Diagnosis",
+  "tags": ["llm-gateway", "diagnosis"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Current diagnosis candidates (top 3)",
+      "description": "Confirmed candidates. Cooldown suppresses repeat notifications, not current state. Evidence: GET /admin/diagnosis. Check evaluation age before interpreting an empty table as normal.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 18, "h": 8},
+      "targets": [{"refId": "A", "expr": "llm_gateway_diagnosis_active == 1", "instant": true, "format": "table"}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Seconds since last evaluation",
+      "description": "Default interval: 60s. More than 2x configured interval means stale diagnosis. A recent evaluation does not guarantee complete signals; inspect /admin/diagnosis/status.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 120}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "time() - llm_gateway_diagnosis_last_evaluation_timestamp_seconds", "instant": true}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Diagnosis reports after cooldown (15m)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (deployment_id, rule_id, severity) (increase(llm_gateway_diagnosis_total[15m]))", "legendFormat": "{{deployment_id}} / {{rule_id}} / {{severity}}"}]
+    }
+  ]
+}

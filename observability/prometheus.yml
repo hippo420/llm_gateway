@@ -23,6 +23,14 @@ scrape_configs:
       - targets: ["host.docker.internal:8000"]
         labels: { serving: vllm }
 
+  # Spring 앱(mony_batch) - mony_llm_call_seconds / mony_llm_context_seconds (spring/phase-02)
+  # local 프로파일 server.port=21820. dev 는 31820.
+  - job_name: mony-batch
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:21820"]
+        labels: { service: mony-batch }
+
   - job_name: node
     static_configs:
       - targets: ["node-exporter:9100"]
