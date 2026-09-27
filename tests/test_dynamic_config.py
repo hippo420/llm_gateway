@@ -36,9 +36,9 @@ def observe_reloads(manager, predicate):
     event = asyncio.Event()
     original = manager.reload
 
-    async def reload(trigger="admin"):
+    async def reload(trigger="admin", **kwargs):
         try:
-            return await original(trigger)
+            return await original(trigger, **kwargs)
         finally:
             if predicate():
                 event.set()
@@ -351,8 +351,8 @@ async def test_pubsub_updates_another_manager(system):
     updated = asyncio.Event()
     original_reload = second.reload
 
-    async def reload(trigger="admin"):
-        result = await original_reload(trigger)
+    async def reload(trigger="admin", **kwargs):
+        result = await original_reload(trigger, **kwargs)
         ready.set()
         if second.registry.resolve("qwen-7b").weight == 30:
             updated.set()
@@ -585,3 +585,101 @@ async def test_failed_redis_write_retains_local_snapshot(system, monkeypatch):
     )
     assert response.status_code == 500
     assert manager.registry.snapshot is old
+
+
+@pytest.mark.parametrize("file_interval", [0, 60])
+async def test_redis_poll_respects_independent_file_watch_interval(system, file_interval):
+    manager, path, _, _, _ = system
+    path.write_text(
+        SAMPLE.replace("http://localhost:11434", "http://pending:11434"), encoding="utf-8"
+    )
+    polled = observe_reloads(manager, lambda: True)
+    task = asyncio.create_task(manager.poll(file_interval, 0.01))
+    try:
+        await asyncio.wait_for(polled.wait(), timeout=2)
+        assert manager.registry.resolve("qwen-7b").endpoint == "http://localhost:11434"
+        assert (
+            manager.sources()["base"]["models"]["qwen-7b"]["deployments"][0]["endpoint"]
+            == "http://localhost:11434"
+        )
+        await manager.reload()
+        assert manager.registry.resolve("qwen-7b").endpoint == "http://pending:11434"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_redis_pubsub_uses_accepted_yaml_during_invalid_file_edit(system):
+    manager, path, redis, _, _ = system
+    ready = observe_reloads(manager, lambda: True)
+    task = asyncio.create_task(manager.subscribe())
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        path.write_text("models: [", encoding="utf-8")
+        now = datetime.now(UTC)
+        document = OverrideDocument(
+            updated_at=now,
+            updated_by="operator",
+            reason="maintenance",
+            deployments={DEPLOYMENT: DeploymentOverride(enabled=False)},
+            expires_at={DEPLOYMENT: now + timedelta(hours=1)},
+        )
+        updated = observe_reloads(
+            manager,
+            lambda: not manager.registry.snapshot.models["qwen-7b"].deployments[0].enabled,
+        )
+        await redis.set(RedisConfigSource.KEY, document.model_dump_json())
+        await redis.publish(RedisConfigSource.CHANNEL, "changed")
+        await asyncio.wait_for(updated.wait(), timeout=2)
+        assert not manager.registry.snapshot.models["qwen-7b"].deployments[0].enabled
+        assert manager.source.base.is_stale()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("remove_file", [False, True])
+async def test_invalid_or_missing_yaml_does_not_block_override_expiry(system, remove_file):
+    manager, path, redis, _, client = system
+    await client.put(
+        f"/admin/deployments/{DEPLOYMENT}",
+        json={"enabled": False, "reason": "temporary"},
+    )
+    if remove_file:
+        path.unlink()
+    else:
+        path.write_text("models: [", encoding="utf-8")
+    await redis.delete(RedisConfigSource.KEY)
+    restored = observe_reloads(
+        manager,
+        lambda: manager.registry.snapshot.models["qwen-7b"].deployments[0].enabled,
+    )
+    failures = CONFIG_RELOAD.labels("poll", "failed")._value.get()
+    task = asyncio.create_task(manager.poll(0.01, 0.01))
+    try:
+        await asyncio.wait_for(restored.wait(), timeout=2)
+        assert manager.registry.resolve("qwen-7b").endpoint == "http://localhost:11434"
+        assert CONFIG_RELOAD.labels("poll", "failed")._value.get() > failures
+        assert manager.source.base.is_stale()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_rejected_layer_merge_does_not_accept_file_mtime_or_raw(system):
+    manager, path, redis, _, _ = system
+    accepted = manager.sources()["base"]
+    path.write_text(
+        SAMPLE.replace("http://localhost:11434", "http://pending:11434"), encoding="utf-8"
+    )
+    await redis.set(RedisConfigSource.KEY, "invalid JSON")
+    with pytest.raises(ConfigError):
+        await manager.reload()
+    assert manager.source.base.is_stale()
+    assert manager.sources()["base"] == accepted
+    await redis.delete(RedisConfigSource.KEY)
+    await manager.reload("poll", refresh_base=False)
+    assert manager.sources()["base"] == accepted
+    assert manager.registry.resolve("qwen-7b").endpoint == "http://localhost:11434"
+    await manager.reload()
+    assert manager.registry.resolve("qwen-7b").endpoint == "http://pending:11434"

@@ -15,17 +15,18 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 3 코드 구현 완료.** (실측 baseline 설정 / 부하 재현 / 24시간 오탐 관찰은 남음)
+**Phase 4 코드 구현 완료.** (실제 Redis/Ollama 운영 검증 및 Phase 3 실측 baseline/오탐 관찰은 남음)
 
 - `pytest` — **실제 Ollama 없이 돈다** (R1~R6 진단 재현 테스트 포함)
-- `GET /metrics` 로 L1/L2 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 5종)
+- `GET /metrics` 로 L1/L2 및 설정 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 6종)
 - `GET /admin/diagnosis`로 규칙 기반 진단 조회. baseline 설정 후 `GATEWAY_DIAGNOSIS_ENABLED=true`
-- 남아 있는 `NotImplementedError` 는 Phase 4(Redis config) 자리표시자뿐
+- YAML 감시, Redis 임시 override/TTL/pub-sub, 검증 후 무중단 설정 교체
+- `/admin/config`에서 유효 설정 조회. 모든 `/admin` API는 `GATEWAY_API_KEY` 설정 및 Bearer 인증 필수
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
   [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md) ·
-  [Phase 3](docs/phases/phase-03-implementation.md)
+  [Phase 3](docs/phases/phase-03-implementation.md) · [Phase 4](docs/phases/phase-04-implementation.md)
 
-다음 작업은 **실측 baseline 설정 및 운영 검증** (최소 2주치 지표 + baseline 문서화).
+다음 구현은 **Phase 5 모델 라우터**다. 실측 baseline 설정 및 운영 검증도 별도로 남아 있다.
 
 ---
 
@@ -85,6 +86,21 @@ mypy
 ```
 
 테스트는 **실제 Ollama 없이** 전부 통과해야 한다. (`tests/conftest.py` 의 `FakeAdapter`)
+
+### 동적 설정 (Phase 4)
+
+YAML 변경은 기본 5초 주기로 감지한다. 검증 실패 시 기존 설정을 유지하고,
+이미 처리 중인 요청은 이전 endpoint/timeout으로 완료한다.
+
+```bash
+docker compose --profile config up -d redis
+```
+
+`.env`에 `GATEWAY_REDIS_URL=redis://localhost:6379/0` 및 `GATEWAY_API_KEY`를 설정하고
+Gateway를 시작한다. Redis 없이도 YAML 감시/조회/수동 reload는 사용할 수 있다.
+임시 변경은 `PUT /admin/deployments/{id}`로 적용하며, `reason`은 필수,
+`ttl_sec`는 기본 3600초(최대 86400초)다. 상세 예제와 장애 동작은
+[Phase 4 구현 기록](docs/phases/phase-04-implementation.md)을 참고한다.
 
 ---
 

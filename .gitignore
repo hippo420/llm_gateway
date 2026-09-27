@@ -6,6 +6,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.phase04-validation/
 *.egg-info/
 build/
 dist/

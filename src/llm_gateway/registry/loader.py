@@ -62,7 +62,7 @@ class YamlConfigSource(ConfigSource[RegistrySnapshot]):
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._last_mtime: float | None = None
+        self._last_mtime: int | None = None
         self.raw: dict[str, Any] = {}
 
     async def read(self) -> RegistrySnapshot:
@@ -110,8 +110,12 @@ class YamlConfigSource(ConfigSource[RegistrySnapshot]):
     def is_stale(self) -> bool:
         """파일 mtime 이 마지막 load 시점과 다른지 (Phase 4 watcher 가 쓴다)."""
         if not self._path.is_file():
-            return False
+            return True
         return self._path.stat().st_mtime_ns != self._last_mtime
+
+    def invalidate(self) -> None:
+        """Retry a file candidate rejected by validation of the combined layers."""
+        self._last_mtime = None
 
 
 class RedisConfigSource(ConfigSource[OverrideDocument]):
@@ -190,8 +194,19 @@ class LayeredConfigSource(ConfigSource[RegistrySnapshot]):
         self.redis_available: bool | None = None
         self.base_raw: dict[str, Any] = {}
 
-    async def read(self) -> RegistrySnapshot:
-        base = await self.base.read()
+    async def read(self, *, refresh_base: bool = True) -> RegistrySnapshot:
+        try:
+            return await self._read(refresh_base=refresh_base)
+        except BaseException:
+            if refresh_base:
+                self.base.invalidate()
+            raise
+
+    async def _read(self, *, refresh_base: bool) -> RegistrySnapshot:
+        # Redis notifications/expiry use the accepted base, even while a YAML edit is invalid.
+        base = await self.base.read() if refresh_base else self.base_snapshot
+        if base is None:
+            raise ConfigError("base configuration is not loaded")
         document = OverrideDocument()
         if self.override:
             try:
@@ -204,7 +219,8 @@ class LayeredConfigSource(ConfigSource[RegistrySnapshot]):
                 log_event(log, "config_redis_unavailable", level=logging.WARNING)
         effective = self.merge(base, document)
         self.base_snapshot = base
-        self.base_raw = self.base.raw
+        if refresh_base:
+            self.base_raw = self.base.raw
         self.override_document = document
         return effective
 

@@ -1,0 +1,50 @@
+{
+  "uid": "llm-config",
+  "title": "LLM Gateway / Configuration",
+  "tags": ["llm-gateway", "configuration"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Applied revision per instance",
+      "description": "Process-local revision; resets at restart. Compare content_hash via GET /admin/config across instances.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 6},
+      "targets": [{"refId": "A", "expr": "llm_gateway_config_version", "instant": true, "legendFormat": "{{job}} / {{instance}}"}]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Seconds since effective config changed",
+      "description": "Age of last content change, not watcher health. A stable configuration can remain unchanged indefinitely.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 6},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "time() - llm_gateway_config_version_timestamp", "instant": true, "legendFormat": "{{job}} / {{instance}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Reload attempts (5m)",
+      "description": "Failed reloads retain accepted settings. Redis reconciliation may still succeed while a YAML edit is invalid.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 24, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, source, result) (increase(llm_gateway_config_reload_total[5m]))", "legendFormat": "{{job}} / {{instance}} / {{source}} / {{result}}"}]
+    },
+    {
+      "id": 4, "type": "table", "title": "Deployment enabled (1 / 0)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "llm_gateway_deployment_enabled", "instant": true, "format": "table"}]
+    },
+    {
+      "id": 5, "type": "table", "title": "Deployment weight",
+      "description": "Configured weight; routing remains first enabled candidate until Phase 5.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "llm_gateway_deployment_weight", "instant": true, "format": "table"}]
+    }
+  ]
+}

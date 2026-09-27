@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     config_redis_poll_sec: int = Field(default=5, ge=1)
 
     # --- auth ---
-    # 비어 있으면 인증 비활성
+    # 비어 있으면 chat 인증 비활성, admin API 접근 거부.
     api_key: str = ""
 
     # --- logging ---

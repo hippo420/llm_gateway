@@ -142,11 +142,11 @@ class ConfigManager:
         CONFIG_RELOAD.labels(trigger, "success").inc()
         return changed
 
-    async def reload(self, trigger: str = "admin") -> bool:
+    async def reload(self, trigger: str = "admin", *, refresh_base: bool = True) -> bool:
         async with self.lock:
             try:
                 previous = self.source.override_document
-                candidate = await self.source.read()
+                candidate = await self.source.read(refresh_base=refresh_base)
                 if previous != self.source.override_document:
                     document = self.source.override_document
                     log_event(
@@ -282,20 +282,33 @@ class ConfigManager:
             self.tasks.append(asyncio.create_task(self.subscribe(), name="config-pubsub"))
 
     async def poll(self, file_interval: float, redis_interval: float) -> None:
-        interval = min(file_interval, redis_interval) if file_interval > 0 else redis_interval
-        if self.source.override is None:
-            interval = file_interval
+        loop = asyncio.get_running_loop()
+        next_file = loop.time() + file_interval if file_interval > 0 else float("inf")
+        next_redis = (
+            loop.time() + redis_interval if self.source.override is not None else float("inf")
+        )
         while True:
-            await asyncio.sleep(interval)
-            try:
-                if self.source.override is not None or await asyncio.to_thread(
-                    self.source.base.is_stale
-                ):
-                    await self.reload("poll")
-            except Exception as exc:
-                log_event(
-                    log, "config_poll_failed", level=logging.WARNING, error_type=type(exc).__name__
-                )
+            await asyncio.sleep(max(0, min(next_file, next_redis) - loop.time()))
+            if loop.time() >= next_file:
+                try:
+                    if await asyncio.to_thread(self.source.base.is_stale):
+                        await self.reload("poll")
+                except ConfigError:
+                    pass  # reload records the failure; Redis reconciliation must still run.
+                except OSError as exc:
+                    log_event(
+                        log,
+                        "config_poll_failed",
+                        level=logging.WARNING,
+                        error_type=type(exc).__name__,
+                    )
+                next_file = loop.time() + file_interval
+            if loop.time() >= next_redis:
+                try:
+                    await self.reload("poll", refresh_base=False)
+                except ConfigError:
+                    pass
+                next_redis = loop.time() + redis_interval
 
     async def subscribe(self) -> None:
         store = self.source.override
@@ -305,11 +318,11 @@ class ConfigManager:
                 async with store.client.pubsub() as pubsub:
                     await pubsub.subscribe(store.CHANNEL)
                     # Covers a change before subscription acknowledgement / during reconnect.
-                    await self.reload("pubsub")
+                    await self.reload("pubsub", refresh_base=False)
                     async for message in pubsub.listen():
                         if message["type"] == "message":
                             try:
-                                await self.reload("pubsub")
+                                await self.reload("pubsub", refresh_base=False)
                             except ConfigError:
                                 pass
             except asyncio.CancelledError:
