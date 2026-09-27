@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.requests import ClientDisconnect
+from starlette.types import Receive, Scope, Send
 
 from ...core.context import RequestContext
 from ...core.errors import GatewayError, InternalError, RequestCancelledError
@@ -62,15 +64,34 @@ async def _while_connected(work: Coroutine[Any, Any, Result], request: Request) 
 class ManagedStreamingResponse(StreamingResponse):
     def __init__(self, stream: PreparedStream, ctx: RequestContext) -> None:
         self.stream = stream
+        self._events = _sse(stream, ctx)
         super().__init__(
-            _sse(stream, ctx), media_type=SSE_MEDIA_TYPE, headers=_gateway_headers(ctx)
+            self._events, media_type=SSE_MEDIA_TYPE, headers=_gateway_headers(ctx)
         )
 
-    async def __call__(self, scope, receive, send) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # ASGI 2.4 send errors alone cannot detect disconnects while upstream is stalled.
+        # Keep one receive watcher for the full response lifetime on every ASGI version.
+        sender = asyncio.create_task(self.stream_response(send), name="chat-send")
+        watcher = asyncio.create_task(self.listen_for_disconnect(receive), name="chat-disconnect")
         try:
-            await super().__call__(scope, receive, send)
+            done, _ = await asyncio.wait((sender, watcher), return_when=asyncio.FIRST_COMPLETED)
+            if sender in done:
+                await sender
+            if watcher in done:
+                await watcher
+        except OSError as exc:
+            raise ClientDisconnect() from exc
         finally:
-            await self.stream.aclose()
+            sender.cancel()
+            watcher.cancel()
+            await asyncio.gather(sender, watcher, return_exceptions=True)
+            try:
+                await self._events.aclose()
+            finally:
+                await self.stream.aclose()
+        if self.background is not None:
+            await self.background()
 
 
 @router.post(
@@ -120,7 +141,7 @@ async def chat_stream(
     return ManagedStreamingResponse(stream, ctx)
 
 
-async def _sse(chunks: AsyncIterator, ctx: RequestContext) -> AsyncIterator[str]:
+async def _sse(chunks: AsyncIterator, ctx: RequestContext) -> AsyncGenerator[str, None]:
     """chunk iterator -> SSE 텍스트 스트림.
 
     각 이벤트는 반드시 빈 줄(\\n\\n)로 끝난다. 하나라도 빠지면 클라이언트가 멈춘다.

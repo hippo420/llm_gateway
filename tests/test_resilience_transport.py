@@ -6,7 +6,9 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 
 import pytest
+import yaml
 
+from llm_gateway.adapters.factory import ADAPTER_REGISTRY
 from llm_gateway.adapters.ollama import OllamaAdapter
 from llm_gateway.core.errors import (
     UpstreamProtocolError,
@@ -15,11 +17,14 @@ from llm_gateway.core.errors import (
 )
 from llm_gateway.registry.models import TimeoutConfig
 
+from .test_dynamic_config import BODY, DEPLOYMENT
+from .test_dynamic_config import system as system
 from .test_ollama_adapter import _request
+from .test_resilience import CONFIG, SECOND
 
 
 @asynccontextmanager
-async def upstream(frames):
+async def upstream(frames, *, status=200, hits=None):
     tasks = set()
 
     async def handle(reader, writer):
@@ -36,9 +41,11 @@ async def upstream(frames):
                 0,
             )
             await reader.readexactly(length)
+            if hits is not None:
+                hits.append(1)
             writer.write(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
-                b"Content-Type: application/x-ndjson\r\n\r\n"
+                f"HTTP/1.1 {status} Test\r\nTransfer-Encoding: chunked\r\n".encode()
+                + b"Content-Type: application/x-ndjson\r\n\r\n"
             )
             await writer.drain()
             for delay, line in frames:
@@ -138,3 +145,40 @@ async def test_bad_payload_or_missing_final_chunk_is_protocol_error(deployment, 
                 [chunk async for chunk in adapter.stream_chat(_request())]
         finally:
             await adapter.aclose()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_socket_failures_retry_fallback_and_open_breaker(system, monkeypatch, stream):
+    manager, path, _, app, client = system
+    monkeypatch.setitem(ADAPTER_REGISTRY, "ollama", OllamaAdapter)
+    primary_hits, secondary_hits = [], []
+    error_frames = [(0, '{"error":"temporary unavailable"}')]
+    good_frames = [
+        (0, '{"message":{"content":"recovered"},"done":false}'),
+        (0, '{"done":true,"eval_count":1,"prompt_eval_count":1}'),
+    ]
+    async with (
+        upstream(error_frames, status=503, hits=primary_hits) as primary,
+        upstream(good_frames, hits=secondary_hits) as secondary,
+    ):
+        config = yaml.safe_load(CONFIG)
+        deployments = config["models"]["qwen-7b"]["deployments"]
+        deployments[0]["endpoint"] = primary
+        deployments[1]["endpoint"] = secondary
+        config["resilience"]["circuit_breaker"]["enabled"] = True
+        path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        await manager.reload()
+        response = await client.post("/v1/chat/completions", json={**BODY, "stream": stream})
+        assert response.status_code == 200
+        assert response.headers["X-Gateway-Deployment"] == SECOND
+        assert response.headers["X-Gateway-Fallback"] == SECOND
+        assert len(primary_hits) == 2 and len(secondary_hits) == 1
+        assert "recovered" in response.text
+        if stream:
+            assert response.text.endswith("data: [DONE]\n\n")
+        assert app.state.chat_service._breakers.circuits[DEPLOYMENT].state == "open"
+        next_response = await client.post("/v1/chat", json=BODY)
+        assert next_response.status_code == 200
+        assert next_response.headers["X-Gateway-Deployment"] == SECOND
+        assert "X-Gateway-Fallback" not in next_response.headers
+        assert len(primary_hits) == 2 and len(secondary_hits) == 2

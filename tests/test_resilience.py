@@ -640,3 +640,52 @@ async def test_cancellation_during_backoff_does_not_start_another_attempt(fault_
     with pytest.raises(asyncio.CancelledError):
         await task
     assert attempts == closed == {DEPLOYMENT: 1}
+
+
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+@pytest.mark.parametrize("blocked_send", [False, True])
+async def test_disconnect_after_headers_interrupts_stalled_upstream(
+    fault_system, spec_version, blocked_send
+):
+    _, app, _, plans, attempts, closed, _ = fault_system
+    stalled = asyncio.Event()
+    content_sent = asyncio.Event()
+
+    async def partial_then_stall():
+        yield AdapterChatChunk(delta="partial")
+        stalled.set()
+        await asyncio.Event().wait()
+
+    plans[DEPLOYMENT] = [partial_then_stall]
+    ctx = RequestContext(request_id="disconnect-after-headers")
+    service = app.state.chat_service
+    request = ChatCompletionRequest.model_validate({**BODY, "stream": True})
+    stream = await PreparedStream.open(service.stream(request, ctx))
+    response = ManagedStreamingResponse(stream, ctx)
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+        if b"partial" in message.get("body", b""):
+            content_sent.set()
+            if blocked_send:
+                await asyncio.Event().wait()
+
+    async def receive():
+        await content_sent.wait()
+        await stalled.wait()
+        return {"type": "http.disconnect"}
+
+    await asyncio.wait_for(
+        response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send),
+        1,
+    )
+    assert attempts == closed == {DEPLOYMENT: 1}
+    assert stream.task.done()
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() in {"chat-send", "chat-disconnect"} and not task.done()
+    ]
+    assert INFLIGHT.labels("qwen-7b", DEPLOYMENT)._value.get() == 0
+    assert not any(b"[DONE]" in message.get("body", b"") for message in sent)

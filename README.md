@@ -24,6 +24,7 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 - 세션 해시 기반 Weighted 분배, 선택 이유/대체 후보 보존, Redis weight/disable 즉시 반영
 - HealthAware 옵션: 배포별 오류율/P95로 후보 제외, `/admin/routing/status`에서 관측 상태 조회
 - 첫 토큰 수신 전 제한적 재시도/폴백, 실제 처리 배포의 응답 헤더, 취소 시 upstream 정리
+- SSE 전송 중 연결 종료도 감시해 upstream 정지/느린 클라이언트 상황에서 즉시 취소
 - `/admin/config`에서 유효 설정 조회. 모든 `/admin` API는 `GATEWAY_API_KEY` 설정 및 Bearer 인증 필수
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
   [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md) ·
