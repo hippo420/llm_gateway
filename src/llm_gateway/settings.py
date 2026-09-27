@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,8 +30,9 @@ class Settings(BaseSettings):
 
     # --- model registry ---
     config_path: Path = Path("config/gateway.yaml")
-    # 0 이면 파일 감시 비활성 (Phase 4 에서 사용)
-    config_reload_sec: int = 0
+    # 0 이면 파일 감시 비활성. Redis 동기화/TTL 확인은 별도 주기로 계속한다.
+    config_reload_sec: int = Field(default=5, ge=0)
+    config_redis_poll_sec: int = Field(default=5, ge=1)
 
     # --- auth ---
     # 비어 있으면 인증 비활성

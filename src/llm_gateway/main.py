@@ -27,7 +27,8 @@ from .diagnosis.signals import PrometheusClient
 from .middleware.access_log import AccessLogMiddleware
 from .middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 from .observability.metrics import metrics_endpoint, record_error
-from .registry.loader import YamlConfigSource
+from .registry.loader import LayeredConfigSource, RedisConfigSource, YamlConfigSource
+from .registry.manager import CONFIG_RELOAD, ConfigManager
 from .registry.models import ModelRegistry
 from .service.chat_service import ChatService
 from .settings import Settings, get_settings
@@ -43,13 +44,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 설정 로드 실패는 여기서 예외로 올린다 = 기동 중단.
     # 잘못된 설정으로 뜨는 것보다 안 뜨는 게 낫다. (Phase 4 의 reload 실패와는 다르게 다룬다)
-    source = YamlConfigSource(settings.config_path)
-    snapshot = source.load()
+    redis_source = RedisConfigSource(settings.redis_url) if settings.redis_url else None
+    source = LayeredConfigSource(YamlConfigSource(settings.config_path), redis_source)
+    try:
+        snapshot = await source.read()
+    except BaseException:
+        if redis_source:
+            await redis_source.close()
+        raise
 
     app.state.config_source = source
     app.state.registry = ModelRegistry(snapshot)
     app.state.adapters = AdapterFactory()
     app.state.chat_service = ChatService(app.state.registry, app.state.adapters)
+    config_manager = ConfigManager(source, app.state.registry, app.state.adapters)
+    app.state.config_manager = config_manager
+    CONFIG_RELOAD.labels("startup", "success").inc()
 
     log_event(
         log,
@@ -64,6 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     diagnosis_client: PrometheusClient | None = None
     diagnosis_task: asyncio.Task | None = None
     try:
+        config_manager.start(settings.config_reload_sec, settings.config_redis_poll_sec)
         if settings.diagnosis_enabled:
             diagnosis_config = DiagnosisConfig.load(settings.diagnosis_config_path)
             if not diagnosis_config.targets:
@@ -83,6 +94,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.diagnosis_task = diagnosis_task
         yield
     finally:
+        await config_manager.close()
         if diagnosis_task is not None:
             diagnosis_task.cancel()
             await asyncio.gather(diagnosis_task, return_exceptions=True)
@@ -105,6 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # lifespan 이 읽어야 하므로 조립 시점에 먼저 넣는다.
     app.state.settings = settings
     app.state.diagnosis_engine = None
+    app.state.config_manager = None
 
     app.include_router(v1_router)
     app.include_router(ops_router)

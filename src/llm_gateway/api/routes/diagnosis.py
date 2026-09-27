@@ -6,9 +6,9 @@ from fastapi import APIRouter, Depends, Request
 
 from ...diagnosis.engine import DiagnosisEngine
 from ...diagnosis.report import Diagnosis
-from ..dependencies import verify_api_key
+from ..dependencies import verify_admin_key
 
-router = APIRouter(prefix="/admin/diagnosis", dependencies=[Depends(verify_api_key)])
+router = APIRouter(prefix="/admin/diagnosis", dependencies=[Depends(verify_admin_key)])
 
 
 @router.get("")

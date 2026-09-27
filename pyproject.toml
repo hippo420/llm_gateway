@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     # Phase 2
     "prometheus-client>=0.20",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
     "mypy>=1.10",
+    "fakeredis>=2.23",
 ]
 
 [tool.setuptools.packages.find]

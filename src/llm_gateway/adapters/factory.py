@@ -6,8 +6,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from ..core.errors import AdapterNotRegisteredError
-from ..registry.models import ModelDeployment
+from ..registry.models import ModelDeployment, RegistrySnapshot
 from .base import LLMAdapter
 from .ollama import OllamaAdapter
 
@@ -34,16 +39,18 @@ class AdapterFactory:
 
     def __init__(self) -> None:
         self._instances: dict[str, LLMAdapter] = {}
+        self._users: dict[LLMAdapter, int] = {}
+        self._retired: set[LLMAdapter] = set()
+        self._closing: set[asyncio.Task] = set()
 
     def get(self, deployment: ModelDeployment) -> LLMAdapter:
         """deployment 에 대응하는 adapter 인스턴스를 돌려준다 (없으면 생성)."""
         cached = self._instances.get(deployment.id)
         if cached is not None:
-            # 설정이 reload 되어 접속 정보가 바뀌면 캐시된 client 는 옛 endpoint 를 가리킨다.
-            # Phase 4 의 reload 는 close_all() 을 부르지만, 여기서도 한 번 더 막는다.
             if _connection_identity(cached.deployment) == _connection_identity(deployment):
                 return cached
             del self._instances[deployment.id]
+            self._retire(cached)
 
         adapter_cls = ADAPTER_REGISTRY.get(deployment.adapter)
         if adapter_cls is None:
@@ -60,8 +67,58 @@ class AdapterFactory:
         self._instances[deployment.id] = instance
         return instance
 
+    @contextmanager
+    def lease(self, deployment: ModelDeployment) -> Iterator[LLMAdapter]:
+        """Keep an adapter alive across awaits/yields until the caller finishes."""
+        adapter = self.get(deployment)
+        self._users[adapter] = self._users.get(adapter, 0) + 1
+        try:
+            yield adapter
+        finally:
+            self._users[adapter] -= 1
+            if not self._users[adapter]:
+                del self._users[adapter]
+                if adapter in self._retired:
+                    self._schedule_close(adapter)
+
+    def _retire(self, adapter: LLMAdapter) -> None:
+        self._retired.add(adapter)
+        if not self._users.get(adapter):
+            self._schedule_close(adapter)
+
+    def _schedule_close(self, adapter: LLMAdapter) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Synchronous test/setup callers have no event loop; close_all will drain these.
+            return
+        self._retired.discard(adapter)
+        task = loop.create_task(self._close(adapter))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    @staticmethod
+    async def _close(adapter: LLMAdapter) -> None:
+        try:
+            await adapter.aclose()
+        except Exception:
+            logging.getLogger(__name__).warning("retired adapter close failed")
+
+    def retire_unused(self, snapshot: RegistrySnapshot) -> None:
+        active = {d.id: d for m in snapshot.models.values() for d in m.deployments if d.enabled}
+        for name, adapter in list(self._instances.items()):
+            deployment = active.get(name)
+            if deployment is None or _connection_identity(
+                adapter.deployment
+            ) != _connection_identity(deployment):
+                del self._instances[name]
+                self._retire(adapter)
+
     def register(self, name: str, adapter: LLMAdapter) -> None:
         """이미 만들어진 인스턴스를 캐시에 넣는다 (테스트에서 fake 로 바꿔치기할 때)."""
+        previous = self._instances.get(name)
+        if previous is not None and previous is not adapter:
+            self._retire(previous)
         self._instances[name] = adapter
 
     async def close_all(self) -> None:
@@ -69,12 +126,14 @@ class AdapterFactory:
 
         app lifespan 종료 시 반드시 부른다. 안 부르면 uvicorn 종료가 매달린다.
         """
-        instances = list(self._instances.values())
+        instances = set(self._instances.values()) | self._retired
         self._instances.clear()
+        self._retired.clear()
+        await asyncio.gather(*self._closing, return_exceptions=True)
         for adapter in instances:
-            await adapter.aclose()
+            await self._close(adapter)
 
 
-def _connection_identity(deployment: ModelDeployment) -> tuple[str, str, str]:
+def _connection_identity(deployment: ModelDeployment) -> str:
     """캐시된 adapter 를 그대로 써도 되는지 판정하는 키."""
-    return (deployment.adapter, deployment.endpoint, deployment.upstream_model)
+    return deployment.model_dump_json(exclude={"enabled", "weight", "options"})

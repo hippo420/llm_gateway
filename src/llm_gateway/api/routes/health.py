@@ -78,7 +78,8 @@ async def _check(adapters: AdapterFactory, deployment: ModelDeployment) -> Adapt
     started = time.perf_counter()
     try:
         async with asyncio.timeout(HEALTH_TIMEOUT_SEC):
-            ok = await adapters.get(deployment).health()
+            with adapters.lease(deployment) as adapter:
+                ok = await adapter.health()
     except TimeoutError:
         return AdapterHealth(
             deployment_id=deployment.id,

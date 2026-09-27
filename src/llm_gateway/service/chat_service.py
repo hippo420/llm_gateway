@@ -86,9 +86,7 @@ class ChatService:
 
     # ── 공개 API ────────────────────────────────────────────────
 
-    def prepare(
-        self, request: ChatCompletionRequest, ctx: RequestContext
-    ) -> ModelDeployment:
+    def prepare(self, request: ChatCompletionRequest, ctx: RequestContext) -> ModelDeployment:
         """검증 + deployment 선택. **본문을 흘리기 전에** 끝나야 하는 일이다.
 
         streaming 응답의 헤더(X-Gateway-Deployment)는 첫 바이트 전에 확정되어야 하는데,
@@ -116,11 +114,16 @@ class ChatService:
         (docs/00-architecture.md "7. 개발 규약" 6번).
         """
         deployment = deployment or self.prepare(request, ctx)
-        adapter = self._adapters.get(deployment)
         adapter_req = self._build_adapter_request(request, deployment)
 
         sw = Stopwatch().start()
-        with metrics.inflight_tracker(request.model, deployment.id):
+        with (
+            self._adapters.lease(deployment) as adapter,
+            metrics.inflight_tracker(
+                request.model,
+                deployment.id,
+            ),
+        ):
             try:
                 adapter_response = await self._aggregate_stream(adapter, adapter_req, sw)
             except asyncio.CancelledError:
@@ -152,7 +155,6 @@ class ChatService:
         SSE 인코더(api/routes/chat.py)가 에러 chunk 로 바꿔 내보낸다.
         """
         deployment = deployment or self.prepare(request, ctx)
-        adapter = self._adapters.get(deployment)
         adapter_req = self._build_adapter_request(request, deployment)
 
         completion_id = _completion_id(ctx)
@@ -160,7 +162,13 @@ class ChatService:
         sw = Stopwatch().start()
 
         last_chunk: AdapterChatChunk | None = None
-        with metrics.inflight_tracker(request.model, deployment.id):
+        with (
+            self._adapters.lease(deployment) as adapter,
+            metrics.inflight_tracker(
+                request.model,
+                deployment.id,
+            ),
+        ):
             try:
                 # OpenAI 스트림의 첫 chunk 는 role 만 담는다. 여기에는 content 가 없으므로
                 # TTFT 로 세지 않는다.
@@ -190,9 +198,7 @@ class ChatService:
                 self._on_failed(request, deployment, ctx, exc, stream=True)
                 raise
 
-        timings = self._merge_timings(
-            sw.finish(), last_chunk.timings if last_chunk else None
-        )
+        timings = self._merge_timings(sw.finish(), last_chunk.timings if last_chunk else None)
         usage = last_chunk.usage if last_chunk else None
 
         self._on_completed(
@@ -225,9 +231,7 @@ class ChatService:
             )
         _output_format(request)  # json_schema 형식 오류를 adapter 호출 전에 GW-4000 으로
 
-    def _select(
-        self, request: ChatCompletionRequest, ctx: RequestContext
-    ) -> ModelDeployment:
+    def _select(self, request: ChatCompletionRequest, ctx: RequestContext) -> ModelDeployment:
         """논리 모델 -> deployment.
 
         Phase 5 에서 이 메서드 내부만 ModelRouter 호출로 교체된다.

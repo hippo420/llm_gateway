@@ -70,3 +70,10 @@ async def verify_api_key(request: Request) -> None:
     # 길이까지 비밀로 다루기 위해 compare_digest 로만 비교한다 (타이밍 공격 방지).
     if not hmac.compare_digest(token, settings.api_key):
         raise UnauthorizedError("invalid api key")
+
+
+async def verify_admin_key(request: Request) -> None:
+    """Admin endpoints are closed until an API key is configured."""
+    if not request.app.state.settings.auth_enabled:
+        raise UnauthorizedError("admin API requires a configured API key")
+    await verify_api_key(request)

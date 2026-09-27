@@ -351,8 +351,7 @@ async def test_loop_recovers_and_cancels(engine, monkeypatch):
 
 
 async def test_admin_api_disabled_and_auth(client, app):
-    assert (await client.get("/admin/diagnosis")).json() == []
-    assert (await client.get("/admin/diagnosis/status")).json()["enabled"] is False
+    assert (await client.get("/admin/diagnosis")).status_code == 401
     app.state.settings.api_key = "secret"
     assert (await client.get("/admin/diagnosis")).status_code == 401
     assert (await client.get("/admin/diagnosis/status")).status_code == 401
@@ -364,9 +363,14 @@ async def test_admin_api_disabled_and_auth(client, app):
             },
         )
     ).status_code == 200
+    client.headers["Authorization"] = "Bearer secret"
+    assert (await client.get("/admin/diagnosis")).json() == []
+    assert (await client.get("/admin/diagnosis/status")).json()["enabled"] is False
 
 
 async def test_admin_api_evidence(client, app, engine, normal):
+    app.state.settings.api_key = "secret"
+    client.headers["Authorization"] = "Bearer secret"
     bad = replace(normal, ttft_p95=2, gpu_memory_used_ratio=0.99)
     for tick in (0, 60, 120):
         evaluate(engine, bad, tick)
@@ -419,6 +423,8 @@ async def test_lifespan_starts_and_closes_diagnosis(target, tmp_path, monkeypatc
 
 
 async def test_prometheus_to_api_and_metrics(target, app, client, monkeypatch):
+    app.state.settings.api_key = "secret"
+    client.headers["Authorization"] = "Bearer secret"
     from llm_gateway.diagnosis.report import TOTAL
 
     target = target.model_copy(update={"queries": {"gpu_memory_used_ratio": "memory"}})

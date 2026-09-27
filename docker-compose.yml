@@ -9,6 +9,13 @@
 # 3000 같은 포트가 막혀 있을 수 있다 (`netsh interface ipv4 show excludedportrange protocol=tcp`).
 #   GRAFANA_PORT=3300 docker compose up -d
 services:
+  redis:
+    image: redis:7-alpine
+    profiles: [config]
+    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
+    # Override is temporary; YAML remains the source of truth.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
   prometheus:
     image: prom/prometheus:latest
     ports: ["${PROMETHEUS_PORT:-9090}:9090"]

@@ -9,14 +9,20 @@ Phase 4: RedisConfigSource + LayeredConfigSource(우선순위 병합) 추가.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 from urllib.parse import urlparse
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from redis.asyncio import Redis
+from redis.exceptions import RedisError, WatchError
 
 from ..core.errors import (
     AdapterNotRegisteredError,
@@ -32,6 +38,7 @@ from .models import (
     RegistrySnapshot,
     TimeoutConfig,
 )
+from .overrides import OverrideDocument, TimeoutPatch, deep_merge
 
 log = logging.getLogger(__name__)
 
@@ -39,24 +46,27 @@ log = logging.getLogger(__name__)
 SUPPORTED_VERSIONS = frozenset({1})
 
 
-class ConfigSource(ABC):
-    """설정 원천. Phase 4 에서 구현체가 늘어난다."""
+SourceValue = TypeVar("SourceValue")
+
+
+class ConfigSource(ABC, Generic[SourceValue]):
+    """All runtime sources provide an asynchronous read boundary."""
 
     @abstractmethod
-    def load(self) -> RegistrySnapshot:
-        """설정을 읽어 검증된 스냅샷을 만든다. 실패 시 ConfigError 계열을 올린다."""
-
-    @abstractmethod
-    def is_stale(self) -> bool:
-        """원천이 변경되어 reload 가 필요한지. (Phase 4 의 파일 mtime / Redis 버전 비교)"""
+    async def read(self) -> SourceValue:
+        """Read a candidate; consumers publish only after complete validation."""
 
 
-class YamlConfigSource(ConfigSource):
+class YamlConfigSource(ConfigSource[RegistrySnapshot]):
     """config/gateway.yaml 을 읽는다. **정본(Source of Truth).**"""
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._last_mtime: float | None = None
+        self.raw: dict[str, Any] = {}
+
+    async def read(self) -> RegistrySnapshot:
+        return await asyncio.to_thread(self.load)
 
     def load(self) -> RegistrySnapshot:
         """YAML 을 읽어 검증된 스냅샷을 만든다."""
@@ -70,12 +80,15 @@ class YamlConfigSource(ConfigSource):
             )
 
         try:
-            # safe_load 를 쓴다. load 는 임의 파이썬 객체를 생성할 수 있어 금지.
-            raw = yaml.safe_load(self._path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
+            # SafeLoader에 중복 키 검사만 추가한다. 임의 Python 객체 생성은 허용하지 않는다.
+            mtime = self._path.stat().st_mtime_ns
+            raw = yaml.load(self._path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+            if self._path.stat().st_mtime_ns != mtime:
+                raise ConfigError("config changed during read; retry reload")
+        except (yaml.YAMLError, OSError, UnicodeError, TypeError) as exc:
             raise ConfigError(
-                f"config file is not valid YAML: {self._path}",
-                detail={"path": str(self._path), "cause": str(exc)},
+                "config file cannot be read as valid YAML",
+                detail={"cause": type(exc).__name__},
             ) from exc
 
         if not isinstance(raw, dict):
@@ -84,19 +97,24 @@ class YamlConfigSource(ConfigSource):
                 detail={"path": str(self._path)},
             )
 
-        snapshot = _parse_yaml(raw)
+        try:
+            validated = GatewayConfig.model_validate(raw)
+            snapshot = _parse_yaml(validated.model_dump(exclude_none=True, exclude_unset=True))
+        except (ValidationError, TypeError, ValueError) as exc:
+            raise ConfigError("invalid configuration schema") from exc
         validate_snapshot(snapshot, known_adapters())
-        self._last_mtime = self._path.stat().st_mtime
+        self.raw = raw
+        self._last_mtime = mtime
         return snapshot
 
     def is_stale(self) -> bool:
         """파일 mtime 이 마지막 load 시점과 다른지 (Phase 4 watcher 가 쓴다)."""
         if not self._path.is_file():
             return False
-        return self._path.stat().st_mtime != self._last_mtime
+        return self._path.stat().st_mtime_ns != self._last_mtime
 
 
-class RedisConfigSource(ConfigSource):
+class RedisConfigSource(ConfigSource[OverrideDocument]):
     """운영 중 임시 override. **항상 임시다** - 영구 변경은 YAML 에 반영한다.
 
     Key:     gateway:config:override
@@ -106,31 +124,159 @@ class RedisConfigSource(ConfigSource):
     override 금지 필드: id, adapter, endpoint, upstream_model
       -> Git 에 없는 구성으로 운영되는 상태를 만들지 않기 위함.
 
-    Phase 4 에서 구현한다.
+    Writes use WATCH/MULTI so concurrent operators do not overwrite each other.
     """
 
-    def __init__(self, redis_url: str) -> None:
-        self._redis_url = redis_url
+    KEY = "gateway:config:override"
+    CHANNEL = "gateway:config:changed"
 
-    def load(self) -> RegistrySnapshot:
-        raise NotImplementedError("Phase 4")
+    def __init__(self, redis_url: str, *, client: Redis | None = None) -> None:
+        self.client = (
+            client
+            if client is not None
+            else Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+        )
 
-    def is_stale(self) -> bool:
-        raise NotImplementedError("Phase 4")
+    @staticmethod
+    def decode(raw: str | bytes | None) -> OverrideDocument:
+        try:
+            return OverrideDocument.model_validate_json(raw) if raw else OverrideDocument()
+        except ValidationError as exc:
+            raise ConfigError("invalid Redis override document") from exc
+
+    async def read(self) -> OverrideDocument:
+        return self.decode(await self.client.get(self.KEY)).active()
+
+    async def update(
+        self,
+        transform: Callable[[OverrideDocument], OverrideDocument],
+    ) -> OverrideDocument:
+        for _ in range(5):
+            async with self.client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(self.KEY)
+                    current = self.decode(await pipe.get(self.KEY)).active()
+                    updated = transform(current)
+                    pipe.multi()
+                    if updated.deployments:
+                        expiry = math.ceil(max(t.timestamp() for t in updated.expires_at.values()))
+                        pipe.set(self.KEY, updated.model_dump_json(), exat=expiry)
+                    else:
+                        pipe.delete(self.KEY)
+                    pipe.publish(self.CHANNEL, "changed")
+                    await pipe.execute()
+                    return updated
+                except WatchError:
+                    continue
+        raise ConfigError("concurrent override updates; retry the request")
+
+    async def close(self) -> None:
+        await self.client.aclose()
 
 
-class LayeredConfigSource(ConfigSource):
-    """base 위에 override 를 얹는다. Phase 4."""
+class LayeredConfigSource(ConfigSource[RegistrySnapshot]):
+    """Build a complete candidate. A failed read never changes accepted source views."""
 
-    def __init__(self, base: ConfigSource, override: ConfigSource | None = None) -> None:
-        self._base = base
-        self._override = override
+    def __init__(self, base: YamlConfigSource, override: RedisConfigSource | None = None) -> None:
+        self.base = base
+        self.override = override
+        self.base_snapshot: RegistrySnapshot | None = None
+        self.override_document = OverrideDocument()
+        self.redis_available: bool | None = None
+        self.base_raw: dict[str, Any] = {}
 
-    def load(self) -> RegistrySnapshot:
-        raise NotImplementedError("Phase 4")
+    async def read(self) -> RegistrySnapshot:
+        base = await self.base.read()
+        document = OverrideDocument()
+        if self.override:
+            try:
+                document = await self.override.read()
+                self.redis_available = True
+            except RedisError:
+                self.redis_available = False
+                # Startup uses YAML; once running retain last-known overrides until their TTL.
+                document = self.override_document.active()
+                log_event(log, "config_redis_unavailable", level=logging.WARNING)
+        effective = self.merge(base, document)
+        self.base_snapshot = base
+        self.base_raw = self.base.raw
+        self.override_document = document
+        return effective
 
-    def is_stale(self) -> bool:
-        raise NotImplementedError("Phase 4")
+    @staticmethod
+    def merge(base: RegistrySnapshot, document: OverrideDocument) -> RegistrySnapshot:
+        from ..adapters.factory import known_adapters
+
+        raw = base.model_dump()
+        remaining = set(document.deployments)
+        for model in raw["models"].values():
+            for index, deployment in enumerate(model["deployments"]):
+                patch = document.deployments.get(deployment["id"])
+                if patch is not None:
+                    model["deployments"][index] = deep_merge(deployment, patch.patch())
+                    remaining.discard(deployment["id"])
+        if remaining:
+            raise ConfigError("override references an unknown deployment")
+        try:
+            snapshot = RegistrySnapshot.model_validate(raw)
+        except ValidationError as exc:
+            raise ConfigError("invalid effective configuration") from exc
+        validate_snapshot(snapshot, known_adapters())
+        return snapshot
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """Reject silently overwritten YAML keys, including duplicate model names."""
+
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.YAMLError("duplicate YAML key")
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
+class RawDeployment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1)
+    adapter: str = Field(min_length=1)
+    endpoint: str = Field(min_length=1)
+    upstream_model: str = Field(min_length=1)
+    enabled: bool = True
+    weight: int = Field(default=100, ge=0, le=100, strict=True)
+    timeout: TimeoutPatch = Field(default_factory=TimeoutPatch)
+    options: GenerationOptions = Field(default_factory=GenerationOptions)
+    extra: dict[str, Any] = Field(default_factory=dict)
+    api_key_env: str | None = None
+
+
+class RawModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    description: str | None = None
+    deployments: list[RawDeployment] = Field(min_length=1)
+
+
+class RawDefaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    timeout: TimeoutPatch = Field(default_factory=TimeoutPatch)
+    options: GenerationOptions = Field(default_factory=GenerationOptions)
+
+
+class GatewayConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = 1
+    defaults: RawDefaults = Field(default_factory=RawDefaults)
+    models: dict[str, RawModel] = Field(min_length=1)
+    routing: dict[str, Any] = Field(default_factory=dict)
+    resilience: dict[str, Any] = Field(default_factory=dict)
 
 
 def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> None:
@@ -174,11 +320,19 @@ def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> N
                     adapter=dep.adapter,
                 )
 
-            parsed = urlparse(dep.endpoint)
-            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            try:
+                parsed = urlparse(dep.endpoint)
+                valid_endpoint = (
+                    parsed.scheme in ("http", "https")
+                    and bool(parsed.hostname)
+                    and (parsed.port is None or 0 < parsed.port <= 65535)
+                )
+            except ValueError:
+                valid_endpoint = False
+            if not valid_endpoint:
                 raise ConfigError(
-                    f"invalid endpoint {dep.endpoint} (deployment {dep.id})",
-                    detail={"id": dep.id, "endpoint": dep.endpoint},
+                    "invalid deployment endpoint",
+                    detail={"id": dep.id},
                 )
 
             if not 0 <= dep.weight <= 100:
@@ -222,7 +376,7 @@ def _parse_yaml(raw: dict[str, Any]) -> RegistrySnapshot:
                 deployments.append(ModelDeployment(**fields))
             except (TypeError, ValueError) as exc:
                 raise ConfigError(
-                    f"invalid deployment in model {name}: {exc}",
+                    f"invalid deployment in model {name}",
                     detail={"model": name, "id": fields.get("id")},
                 ) from exc
 

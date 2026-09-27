@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ModelNotFoundError, NoAvailableDeploymentError
 
@@ -27,10 +27,12 @@ def _override_fields(override: BaseModel | dict[str, Any] | None) -> dict[str, A
 class TimeoutConfig(BaseModel):
     """3단계 timeout. 하나로 합치면 원인 구분이 불가능하다 (docs/phases/phase-06)."""
 
-    connect: float = 5.0
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    connect: float = Field(default=5.0, gt=0)
     # streaming 에서는 chunk 간 무응답 허용 시간이다. 전체 시간이 아니다.
-    read: float = 30.0
-    total: float = 180.0
+    read: float = Field(default=30.0, gt=0)
+    total: float = Field(default=180.0, gt=0)
 
     def merged_with(self, override: TimeoutConfig | dict[str, Any] | None) -> TimeoutConfig:
         """부분 override 병합. override 에 없는 필드는 self 값을 유지한다."""
@@ -40,17 +42,17 @@ class TimeoutConfig(BaseModel):
 class GenerationOptions(BaseModel):
     """생성 파라미터 기본값."""
 
-    temperature: float | None = None
-    top_p: float | None = None
-    max_tokens: int | None = None
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    max_tokens: int | None = Field(default=None, gt=0)
     stop: list[str] | None = None
     seed: int | None = None
     # Ollama num_ctx. 모델별 기본값을 gateway.yaml 에 두고 요청이 덮어쓴다.
-    num_ctx: int | None = None
+    num_ctx: int | None = Field(default=None, gt=0)
 
-    def merged_with(
-        self, override: GenerationOptions | dict[str, Any] | None
-    ) -> GenerationOptions:
+    def merged_with(self, override: GenerationOptions | dict[str, Any] | None) -> GenerationOptions:
         """부분 override 병합.
 
         override 의 값이 None 이면 "미지정"이므로 **덮어쓰지 않는다.**
@@ -62,13 +64,15 @@ class GenerationOptions(BaseModel):
 class ModelDeployment(BaseModel):
     """논리 모델의 물리적 실체 하나."""
 
-    id: str                       # 전역 고유. 관례: <logical>@<adapter>
-    logical_model: str            # 소속 논리 모델명
-    adapter: str                  # factory 등록명: ollama | vllm | openai
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1)  # 전역 고유. 관례: <logical>@<adapter>
+    logical_model: str  # 소속 논리 모델명
+    adapter: str  # factory 등록명: ollama | vllm | openai
     endpoint: str
-    upstream_model: str           # 실제 서빙되는 모델명
+    upstream_model: str  # 실제 서빙되는 모델명
     enabled: bool = True
-    weight: int = 100             # Phase 5 부터 사용
+    weight: int = Field(default=100, ge=0, le=100)  # Phase 5 부터 사용
     timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     options: GenerationOptions = Field(default_factory=GenerationOptions)
     # adapter 고유 옵션 (예: ollama keep_alive). 남용하면 추상화가 무너진다.
@@ -79,6 +83,8 @@ class ModelDeployment(BaseModel):
 
 class ModelEntry(BaseModel):
     """하나의 논리 모델과 그 후보 deployment 들."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str
     description: str | None = None
@@ -92,8 +98,10 @@ class RegistrySnapshot(BaseModel):
     부분 갱신을 허용하면 요청 처리 도중 설정이 반쯤 바뀐 상태가 생긴다.
     """
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     version: int
-    loaded_at: str                       # ISO8601
+    loaded_at: str  # ISO8601
     models: dict[str, ModelEntry] = Field(default_factory=dict)
     defaults_timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     defaults_options: GenerationOptions = Field(default_factory=GenerationOptions)
@@ -157,8 +165,5 @@ class ModelRegistry:
     def all_deployments(self) -> list[ModelDeployment]:
         """readyz 헬스체크용. enabled 인 것만."""
         return [
-            d
-            for entry in self._snapshot.models.values()
-            for d in entry.deployments
-            if d.enabled
+            d for entry in self._snapshot.models.values() for d in entry.deployments if d.enabled
         ]
