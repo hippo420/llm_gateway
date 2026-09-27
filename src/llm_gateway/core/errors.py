@@ -238,6 +238,9 @@ def is_retryable(error: GatewayError, *, stream_started: bool) -> bool:
     """
     if stream_started:
         return False
+    status = error.detail.get("upstream_status")
+    if isinstance(status, int) and 400 <= status < 500:
+        return False
     if error.code in ALWAYS_RETRYABLE_CODES:
         return True
     if error.code == "GW-5004":

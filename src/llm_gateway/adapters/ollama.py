@@ -33,6 +33,7 @@ from ..core.errors import (
 )
 from ..core.timing import ns_to_sec
 from ..registry.models import ModelDeployment
+from ..resilience.timeout import http_timeout
 from .base import (
     AdapterChatChunk,
     AdapterChatRequest,
@@ -99,50 +100,55 @@ class OllamaAdapter(LLMAdapter):
         """
         client = await self._ensure_client()
         payload = self._build_payload(request, stream=True)
-
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.deployment.timeout.total
+        response: httpx.Response | None = None
         try:
-            # httpx 의 read timeout 은 "chunk 간 간격"이라 streaming 과 궁합이 맞는다.
-            # 전체 시간 상한은 httpx 가 모르므로 asyncio.timeout 으로 따로 씌운다.
-            async with asyncio.timeout(self.deployment.timeout.total):
-                async with client.stream("POST", CHAT_PATH, json=payload) as response:
-                    if response.status_code >= 400:
-                        # 에러 body 는 스트림으로 오지 않는다. 읽어야 내용을 볼 수 있다.
-                        await response.aread()
-                        self._raise_for_status(response)
-
-                    async for line in response.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except json.JSONDecodeError as exc:
-                            raise UpstreamProtocolError(
-                                "upstream stream contained a non-JSON line",
-                                detail={"deployment_id": self.deployment.id},
-                            ) from exc
-
-                        if data.get("error"):
-                            raise self._error_from_message(str(data["error"]), status=None)
-
-                        if data.get("done"):
-                            yield AdapterChatChunk(
-                                delta=self._content_of(data),
-                                finish_reason=data.get("done_reason") or "stop",
-                                usage=self._extract_usage(data),
-                                timings=self._extract_timings(data),
-                            )
-                            return
-
-                        yield AdapterChatChunk(delta=self._content_of(data))
-        except asyncio.CancelledError:
-            # 클라이언트 이탈. `async with client.stream(...)` 이 upstream 응답을 닫으므로
-            # GPU 가 혼자 계속 생성하는 상황은 여기서 끊긴다.
-            # 취소는 GatewayError 로 바꾸지 않고 그대로 올린다 (상위가 기록/변환한다).
-            raise
+            async with asyncio.timeout_at(deadline):
+                response = await client.send(
+                    client.build_request("POST", CHAT_PATH, json=payload), stream=True
+                )
+                if response.status_code >= 400:
+                    await response.aread()
+                    self._raise_for_status(response)
+            lines = response.aiter_lines()
+            while True:
+                try:
+                    if loop.time() >= deadline:
+                        raise TimeoutError
+                    async with asyncio.timeout_at(deadline):
+                        line = await anext(lines)
+                except StopAsyncIteration:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise UpstreamProtocolError(
+                        "upstream stream contained a non-JSON line"
+                    ) from exc
+                if not isinstance(data, dict):
+                    raise UpstreamProtocolError("upstream stream line must be an object")
+                if data.get("error"):
+                    raise self._error_from_message(str(data["error"]), status=None)
+                if data.get("done"):
+                    yield AdapterChatChunk(
+                        delta=self._content_of(data),
+                        finish_reason=data.get("done_reason") or "stop",
+                        usage=self._extract_usage(data),
+                        timings=self._extract_timings(data),
+                    )
+                    return
+                yield AdapterChatChunk(delta=self._content_of(data))
         except TimeoutError as exc:
             raise self._translate_exception(exc) from exc
         except httpx.HTTPError as exc:
             raise self._translate_exception(exc) from exc
+        finally:
+            if response is not None:
+                await response.aclose()
+        raise UpstreamProtocolError("upstream stream ended without done=true")
 
     async def health(self) -> bool:
         """endpoint 도달 가능 여부. 모델이 GPU 에 올라와 있는지는 보지 않는다."""
@@ -223,7 +229,12 @@ class OllamaAdapter(LLMAdapter):
     @staticmethod
     def _content_of(data: dict[str, Any]) -> str:
         message = data.get("message") or {}
-        return message.get("content") or ""
+        if not isinstance(message, dict):
+            raise UpstreamProtocolError("upstream message must be an object")
+        content = message.get("content") or ""
+        if not isinstance(content, str):
+            raise UpstreamProtocolError("upstream content must be a string")
+        return content
 
     @staticmethod
     def _extract_usage(data: dict[str, Any]) -> AdapterUsage:
@@ -256,13 +267,7 @@ class OllamaAdapter(LLMAdapter):
 
         total 은 httpx 가 직접 지원하지 않으므로 호출부에서 asyncio.timeout 으로 감싼다.
         """
-        t = self.deployment.timeout
-        return httpx.Timeout(
-            connect=t.connect,
-            read=t.read,
-            write=t.total,
-            pool=t.connect,
-        )
+        return http_timeout(self.deployment.timeout)
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
@@ -272,7 +277,7 @@ class OllamaAdapter(LLMAdapter):
 
         try:
             body = response.json()
-            message = str(body.get("error") or body)
+            message = str((body.get("error") or body) if isinstance(body, dict) else body)
         except (json.JSONDecodeError, ValueError):
             message = response.text[:500]
 
@@ -291,19 +296,19 @@ class OllamaAdapter(LLMAdapter):
             return ModelLoadingError(f"upstream model is loading: {message}", detail=detail)
         if status == 404 and "not found" in lowered:
             # 논리 모델은 있는데 upstream 에 모델이 없는 상태 = 설정과 서버 불일치.
-            return ModelNotFoundError(
-                f"upstream model is not available: {message}", detail=detail
-            )
+            return ModelNotFoundError(f"upstream model is not available: {message}", detail=detail)
         return UpstreamError(f"upstream returned an error: {message}", detail=detail)
 
     def _translate_exception(self, exc: BaseException) -> UpstreamError:
         """httpx / asyncio 예외 -> GatewayError. httpx 예외를 그대로 흘리지 않는다."""
         detail = {"deployment_id": self.deployment.id, "endpoint": self.deployment.endpoint}
 
-        if isinstance(exc, httpx.ConnectTimeout):
+        if isinstance(exc, httpx.ConnectTimeout | httpx.PoolTimeout):
             return UpstreamConnectTimeoutError("upstream connect timed out", detail=detail)
-        if isinstance(exc, httpx.ReadTimeout | httpx.WriteTimeout | httpx.PoolTimeout):
+        if isinstance(exc, httpx.ReadTimeout):
             return UpstreamReadTimeoutError("upstream read timed out", detail=detail)
+        if isinstance(exc, httpx.WriteTimeout):
+            return UpstreamTotalTimeoutError("upstream request write timed out", detail=detail)
         if isinstance(exc, httpx.ConnectError):
             return UpstreamUnavailableError("upstream is unreachable", detail=detail)
         if isinstance(exc, TimeoutError):

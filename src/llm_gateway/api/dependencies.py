@@ -39,8 +39,7 @@ def get_adapter_factory(request: Request) -> AdapterFactory:
 def get_chat_service(request: Request) -> ChatService:
     """lifespan 이 만들어둔 ChatService.
 
-    ChatService 는 상태가 없으므로 요청마다 새로 만들어도 무방하지만,
-    registry/adapters 를 매번 꺼내 조립할 이유가 없어 app.state 에 둔다.
+    Breaker와 health 관측 상태를 worker 수명 동안 유지하므로 요청마다 만들지 않는다.
     """
     return request.app.state.chat_service
 

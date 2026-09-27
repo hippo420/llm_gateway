@@ -1,0 +1,48 @@
+{
+  "uid": "llm-resilience",
+  "title": "LLM Gateway / Resilience",
+  "tags": ["llm-gateway", "resilience"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Additional retry attempts (5m)",
+      "description": "Counts retries that actually start; cancelled backoff waits do not count.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, deployment_id, reason) (increase(llm_gateway_retry_total[5m]))", "legendFormat": "{{job}} / {{instance}} / {{deployment_id}} / {{reason}}"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Fallbacks started (5m)",
+      "description": "Fallback may fail or succeed; use final request outcomes alongside this panel.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, from_deployment, to_deployment, reason) (increase(llm_gateway_fallback_total[5m]))", "legendFormat": "{{job}} / {{instance}} / {{from_deployment}} -> {{to_deployment}} / {{reason}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Timeouts by kind (5m)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, deployment_id, kind) (increase(llm_gateway_timeout_total[5m]))", "legendFormat": "{{job}} / {{instance}} / {{deployment_id}} / {{kind}}"}]
+    },
+    {
+      "id": 4, "type": "table", "title": "Circuit state per worker (0 closed / 1 half open / 2 open)",
+      "description": "State is local to each worker. Cooldown makes a probe eligible; half-open is entered when that probe is admitted.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [{"refId": "A", "expr": "llm_gateway_circuit_breaker_state", "instant": true, "format": "table"}]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Circuit transitions (5m)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 16, "w": 24, "h": 8},
+      "targets": [{"refId": "A", "expr": "sum by (job, instance, deployment_id, to_state) (increase(llm_gateway_circuit_breaker_transition_total[5m]))", "legendFormat": "{{job}} / {{instance}} / {{deployment_id}} / {{to_state}}"}]
+    }
+  ]
+}

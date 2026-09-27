@@ -86,20 +86,23 @@ models:
 
 # ── Phase 5 ────────────────────────────────────────────────────
 routing:
-  strategy: static                  # static | weighted (health/metric 기반 선택은 후속)
+  strategy: static                  # static | weighted | health_aware
   bucket_header: X-Session-Id
+  # health_aware는 배포별 실측 임계값을 명시해야 선택 가능하다.
+  # 설정/표본/복귀 규칙: docs/phases/phase-05-health-aware.md
 
 # ── Phase 6 ────────────────────────────────────────────────────
 resilience:
   retry:
-    max_attempts: 2
+    max_attempts: 2                # 최초 포함, deployment별 최대 시도 수
+    backoff: exponential
     initial_delay_ms: 200
     max_delay_ms: 2000
     jitter: true
     retry_on_stream_started: false  # 절대 true 로 두지 말 것
   fallback:
     enabled: false
-    max_chain: 2
+    max_chain: 2                   # 최초 deployment 포함한 체인 상한
   circuit_breaker:
     enabled: false
     failure_threshold: 5

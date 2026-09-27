@@ -8,16 +8,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...core.context import RequestContext
-from ...core.errors import GatewayError, InternalError
+from ...core.errors import GatewayError, InternalError, RequestCancelledError
 from ...core.logging import log_event
 from ...schemas.chat import ChatCompletionRequest
 from ...service.chat_service import ChatService
+from ...service.streaming import PreparedStream
 from ..dependencies import get_chat_service, get_request_ctx, verify_api_key
 
 log = logging.getLogger(__name__)
@@ -28,6 +30,47 @@ SSE_MEDIA_TYPE = "text/event-stream"
 SSE_DONE = "data: [DONE]\n\n"
 
 DEPLOYMENT_HEADER = "X-Gateway-Deployment"
+Result = TypeVar("Result")
+
+
+async def _while_connected(work: Coroutine[Any, Any, Result], request: Request) -> Result:
+    """The body has been parsed; watch disconnects even before response headers exist."""
+
+    async def disconnected() -> None:
+        while True:
+            if (await request.receive())["type"] == "http.disconnect":
+                return
+
+    task = asyncio.create_task(work)
+    watcher = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait((task, watcher), return_when=asyncio.FIRST_COMPLETED)
+        if watcher in done:
+            raise RequestCancelledError("client closed the connection")
+        return await task
+    except BaseException:
+        task.cancel()
+        results = await asyncio.gather(task, return_exceptions=True)
+        if isinstance(results[0], PreparedStream):
+            await results[0].aclose()
+        raise
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+
+
+class ManagedStreamingResponse(StreamingResponse):
+    def __init__(self, stream: PreparedStream, ctx: RequestContext) -> None:
+        self.stream = stream
+        super().__init__(
+            _sse(stream, ctx), media_type=SSE_MEDIA_TYPE, headers=_gateway_headers(ctx)
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.stream.aclose()
 
 
 @router.post(
@@ -47,13 +90,13 @@ async def chat_completions(
     deployment = service.prepare(request, ctx, http_request.headers)
 
     if request.stream:
-        return StreamingResponse(
-            _sse(service.stream(request, ctx, deployment), ctx),
-            media_type=SSE_MEDIA_TYPE,
-            headers=_gateway_headers(ctx),
+        stream = await _while_connected(
+            PreparedStream.open(service.stream(request, ctx, deployment)),
+            http_request,
         )
+        return ManagedStreamingResponse(stream, ctx)
 
-    result = await service.complete(request, ctx, deployment)
+    result = await _while_connected(service.complete(request, ctx, deployment), http_request)
     return JSONResponse(
         content=result.response.model_dump(mode="json"),
         headers=_gateway_headers(ctx),
@@ -70,11 +113,11 @@ async def chat_stream(
     """stream 값과 무관하게 SSE 로 응답한다."""
     request.stream = True
     deployment = service.prepare(request, ctx, http_request.headers)
-    return StreamingResponse(
-        _sse(service.stream(request, ctx, deployment), ctx),
-        media_type=SSE_MEDIA_TYPE,
-        headers=_gateway_headers(ctx),
+    stream = await _while_connected(
+        PreparedStream.open(service.stream(request, ctx, deployment)),
+        http_request,
     )
+    return ManagedStreamingResponse(stream, ctx)
 
 
 async def _sse(chunks: AsyncIterator, ctx: RequestContext) -> AsyncIterator[str]:
@@ -122,4 +165,6 @@ def _gateway_headers(ctx: RequestContext) -> dict[str, str]:
     headers: dict[str, str] = {}
     if ctx.deployment_id:
         headers[DEPLOYMENT_HEADER] = ctx.deployment_id
+    if ctx.fallback_from and ctx.deployment_id:
+        headers["X-Gateway-Fallback"] = ctx.deployment_id
     return headers

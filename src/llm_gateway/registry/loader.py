@@ -31,6 +31,7 @@ from ..core.errors import (
     DuplicateDeploymentIdError,
 )
 from ..core.logging import log_event
+from ..resilience.config import ResilienceConfig
 from ..routing.config import RoutingConfig
 from .models import (
     GenerationOptions,
@@ -293,7 +294,7 @@ class GatewayConfig(BaseModel):
     defaults: RawDefaults = Field(default_factory=RawDefaults)
     models: dict[str, RawModel] = Field(min_length=1)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
-    resilience: dict[str, Any] = Field(default_factory=dict)
+    resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
 
 
 def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> None:
@@ -368,7 +369,7 @@ def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> N
         total_weight = sum(d.weight for d in entry.deployments if d.enabled)
         if not total_weight:
             log_event(log, "config_zero_weight", level=logging.WARNING, model=name)
-        elif snapshot.routing.strategy == "weighted" and total_weight != 100:
+        elif snapshot.routing.strategy in {"weighted", "health_aware"} and total_weight != 100:
             log_event(
                 log,
                 "config_weights_normalized",
@@ -376,6 +377,21 @@ def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> N
                 model=name,
                 total_weight=total_weight,
             )
+
+    health = snapshot.routing.health_aware
+    if health is not None:
+        unknown = set(health.thresholds) - seen.keys()
+        if unknown:
+            raise ConfigError("health thresholds reference unknown deployments")
+        if snapshot.routing.strategy == "health_aware":
+            missing = {
+                d.id
+                for entry in snapshot.models.values()
+                for d in entry.deployments
+                if d.enabled and d.weight > 0 and d.id not in health.thresholds
+            }
+            if missing:
+                raise ConfigError("health thresholds required for every positive-weight candidate")
 
 
 def _parse_yaml(raw: dict[str, Any]) -> RegistrySnapshot:
@@ -417,5 +433,5 @@ def _parse_yaml(raw: dict[str, Any]) -> RegistrySnapshot:
         defaults_timeout=defaults_timeout,
         defaults_options=defaults_options,
         routing=RoutingConfig.model_validate(raw.get("routing") or {}),
-        resilience=raw.get("resilience") or {},
+        resilience=ResilienceConfig.model_validate(raw.get("resilience") or {}),
     )

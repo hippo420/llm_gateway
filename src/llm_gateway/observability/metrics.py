@@ -68,6 +68,24 @@ ROUTING_NO_CANDIDATE = Counter(
     ["model"],
 )
 
+RETRIES = Counter(
+    "llm_gateway_retry_total", "Additional upstream attempts.", ["deployment_id", "reason"]
+)
+FALLBACKS = Counter(
+    "llm_gateway_fallback_total",
+    "Started fallback deployments.",
+    ["from_deployment", "to_deployment", "reason"],
+)
+TIMEOUTS = Counter("llm_gateway_timeout_total", "Upstream timeouts.", ["deployment_id", "kind"])
+BREAKER_STATE = Gauge(
+    "llm_gateway_circuit_breaker_state", "0 closed, 1 half open, 2 open.", ["deployment_id"]
+)
+BREAKER_TRANSITIONS = Counter(
+    "llm_gateway_circuit_breaker_transition_total",
+    "Breaker transitions.",
+    ["deployment_id", "to_state"],
+)
+
 STATUS_SUCCESS: Final = "success"
 STATUS_ERROR: Final = "error"
 # 클라이언트 이탈. 실패가 아니므로 error rate 에서 빠지도록 따로 둔다 (GW-4007).

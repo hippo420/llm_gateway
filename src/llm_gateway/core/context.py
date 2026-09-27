@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ..registry.models import ModelDeployment
+    from ..resilience.config import ResilienceConfig
     from ..routing.decision import RoutingDecision
 
 _SAFE_HEADER_VALUE = re.compile(r"^[A-Za-z0-9._:@\-]{1,128}$")
@@ -55,7 +57,11 @@ class RequestContext:
     # 실제 선택된 deployment id
     deployment_id: str | None = None
     routing_decision: RoutingDecision | None = None
-    # 첫 content chunk 를 이미 내보냈는가 -> 재시도/폴백 차단 플래그 (Phase 6)
+    resilience_config: ResilienceConfig | None = None
+    current_deployment: ModelDeployment | None = None
+    attempt: int = 0
+    fallback_from: str | None = None
+    # 첫 content를 upstream에서 받았는가. non-stream도 즉시 재시도/폴백 차단.
     stream_started: bool = False
     # errors_total 을 이미 기록했는가 -> 에러 핸들러의 이중 기록 방지 (Phase 2)
     error_recorded: bool = False

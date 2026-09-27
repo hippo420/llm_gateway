@@ -5,8 +5,8 @@
     (1) HTTP 수신          -> route
     (2) RequestContext     -> middleware
     (3) Registry 조회       candidates
-    (4) Router 선택         ModelRouter (Static / Weighted)
-    (5) Resilience 래핑     [Phase 6]  <- 지금은 직접 호출
+    (4) Router 선택         ModelRouter (Static / Weighted / HealthAware)
+    (5) Resilience 래핑     ResiliencePolicy (retry/fallback/breaker)
     (6) Adapter 호출        여기
     (7) 응답 정규화          여기
     (8) 계측 기록           여기 (observability.metrics)
@@ -20,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from typing import Any
 
 from ..adapters.base import (
@@ -30,7 +31,6 @@ from ..adapters.base import (
     AdapterMessage,
     AdapterTimings,
     AdapterUsage,
-    LLMAdapter,
 )
 from ..adapters.factory import AdapterFactory
 from ..core.context import RequestContext, sanitize_header_value
@@ -45,7 +45,10 @@ from ..core.logging import log_event
 from ..core.timing import ChatTimings, Stopwatch
 from ..observability import metrics
 from ..registry.models import ModelDeployment, ModelRegistry
-from ..routing.decision import RoutingContext
+from ..resilience.breaker import CircuitBreakers
+from ..resilience.policy import ResiliencePolicy
+from ..routing.decision import RoutingContext, RoutingDecision
+from ..routing.health import HealthTracker
 from ..routing.router import ModelRouter
 from ..schemas.chat import (
     ChatCompletionChoice,
@@ -85,9 +88,17 @@ class ChatService:
     def __init__(self, registry: ModelRegistry, adapters: AdapterFactory) -> None:
         self._registry = registry
         self._adapters = adapters
-        self._router = ModelRouter(registry)
+        self._breakers = CircuitBreakers()
+        self._health = HealthTracker(registry)
+        self._router = ModelRouter(registry, self._breakers, self._health)
+        self._policy = ResiliencePolicy(
+            registry, self._breakers, observe=self._health.observe, available=self._health.available
+        )
 
     # ── 공개 API ────────────────────────────────────────────────
+
+    def routing_status(self) -> dict[str, Any]:
+        return self._health.report()
 
     def prepare(
         self,
@@ -95,11 +106,9 @@ class ChatService:
         ctx: RequestContext,
         headers: Mapping[str, str] | None = None,
     ) -> ModelDeployment:
-        """검증 + deployment 선택. **본문을 흘리기 전에** 끝나야 하는 일이다.
+        """검증 및 최초 후보 선택. 실제 응답 배포는 실행 중 fallback으로 달라질 수 있다.
 
-        streaming 응답의 헤더(X-Gateway-Deployment)는 첫 바이트 전에 확정되어야 하는데,
-        async generator 는 첫 __anext__ 까지 아무것도 실행하지 않는다.
-        그래서 선택을 이 동기 메서드로 떼어내 라우터가 먼저 호출한다.
+        Streaming 경로는 PreparedStream에서 첫 content/final을 기다린 뒤 헤더를 확정한다.
         """
         try:
             self._validate(request)
@@ -115,40 +124,42 @@ class ChatService:
         ctx: RequestContext,
         deployment: ModelDeployment | None = None,
     ) -> ChatResult:
-        """Non-streaming 응답을 만든다.
-
-        내부적으로는 streaming 호출을 돌려 chunk 를 합친다.
-        non-streaming 요청에서도 TTFT 를 얻기 위한 구조다
-        (docs/00-architecture.md "7. 개발 규약" 6번).
-        """
         deployment = deployment or self.prepare(request, ctx)
-        adapter_req = self._build_adapter_request(request, deployment)
-
         sw = Stopwatch().start()
-        with (
-            self._adapters.lease(deployment) as adapter,
-            metrics.inflight_tracker(
-                request.model,
-                deployment.id,
-            ),
-        ):
-            try:
-                adapter_response = await self._aggregate_stream(adapter, adapter_req, sw)
-            except asyncio.CancelledError:
-                self._on_cancelled(request, deployment, ctx, sw, stream=False)
-                raise
-            except Exception as exc:
-                self._on_failed(request, deployment, ctx, exc, stream=False)
-                raise
-        timings = self._merge_timings(sw.finish(), adapter_response.timings)
-
-        self._on_completed(request, deployment, adapter_response, timings, stream=False)
-
+        parts: list[str] = []
+        usage = AdapterUsage()
+        upstream_timings = AdapterTimings()
+        finish_reason = "stop"
+        try:
+            async with aclosing(self._resilient_chunks(request, ctx, deployment)) as chunks:
+                async for chunk in chunks:
+                    if chunk.delta:
+                        sw.mark_first_token()
+                        parts.append(chunk.delta)
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                    if chunk.timings is not None:
+                        upstream_timings = chunk.timings
+                    if chunk.finish_reason is not None:
+                        finish_reason = chunk.finish_reason
+        except asyncio.CancelledError:
+            self._on_cancelled(request, ctx.current_deployment or deployment, ctx, sw, stream=False)
+            raise
+        except Exception as exc:
+            self._on_failed(request, ctx.current_deployment or deployment, ctx, exc, stream=False)
+            raise
+        actual = ctx.current_deployment or deployment
+        response = AdapterChatResponse(
+            content="".join(parts),
+            finish_reason=finish_reason,
+            usage=usage,
+            timings=upstream_timings,
+            upstream_model=actual.upstream_model,
+        )
+        timings = self._merge_timings(sw.finish(), upstream_timings)
+        self._on_completed(request, actual, response, timings, stream=False)
         return ChatResult(
-            response=self._to_openai_response(adapter_response, request, ctx),
-            deployment=deployment,
-            timings=timings,
-            usage_source=adapter_response.usage.source,
+            self._to_openai_response(response, request, ctx), actual, timings, usage.source
         )
 
     async def stream(
@@ -156,20 +167,86 @@ class ChatService:
         request: ChatCompletionRequest,
         ctx: RequestContext,
         deployment: ModelDeployment | None = None,
-    ) -> AsyncIterator[ChatCompletionChunk]:
-        """Streaming 응답을 만든다.
-
-        스트림 도중 에러는 여기서 삼키지 않고 올린다. HTTP 상태는 이미 200 이므로
-        SSE 인코더(api/routes/chat.py)가 에러 chunk 로 바꿔 내보낸다.
-        """
+    ) -> AsyncGenerator[ChatCompletionChunk, None]:
         deployment = deployment or self.prepare(request, ctx)
-        adapter_req = self._build_adapter_request(request, deployment)
-
         completion_id = _completion_id(ctx)
         created = int(time.time())
         sw = Stopwatch().start()
+        usage = AdapterUsage()
+        upstream_timings = AdapterTimings()
+        finish_reason = "stop"
+        role_sent = False
+        try:
+            async with aclosing(self._resilient_chunks(request, ctx, deployment)) as chunks:
+                async for chunk in chunks:
+                    if chunk.delta:
+                        sw.mark_first_token()
+                    # Policy filters empty keepalives. The actual destination is now committed.
+                    if not role_sent:
+                        role_sent = True
+                        yield ChatCompletionChunk(
+                            id=completion_id,
+                            created=created,
+                            model=request.model,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    delta=ChatCompletionDelta(role="assistant"),
+                                )
+                            ],
+                        )
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                    if chunk.timings is not None:
+                        upstream_timings = chunk.timings
+                    if chunk.finish_reason is not None:
+                        finish_reason = chunk.finish_reason
+                    yield self._to_openai_chunk(chunk, request, completion_id, created)
+        except (asyncio.CancelledError, GeneratorExit):
+            self._on_cancelled(request, ctx.current_deployment or deployment, ctx, sw, stream=True)
+            raise
+        except Exception as exc:
+            self._on_failed(request, ctx.current_deployment or deployment, ctx, exc, stream=True)
+            raise
+        actual = ctx.current_deployment or deployment
+        self._on_completed(
+            request,
+            actual,
+            AdapterChatResponse(
+                content="",
+                finish_reason=finish_reason,
+                usage=usage,
+                timings=upstream_timings,
+                upstream_model=actual.upstream_model,
+            ),
+            self._merge_timings(sw.finish(), upstream_timings),
+            stream=True,
+        )
 
-        last_chunk: AdapterChatChunk | None = None
+    async def _resilient_chunks(
+        self,
+        request: ChatCompletionRequest,
+        ctx: RequestContext,
+        deployment: ModelDeployment,
+    ) -> AsyncGenerator[AdapterChatChunk, None]:
+        decision = ctx.routing_decision or RoutingDecision(deployment, "provided", "static")
+        config = ctx.resilience_config or self._registry.snapshot.resilience
+        async with aclosing(
+            self._policy.execute(
+                decision,
+                config,
+                ctx,
+                lambda candidate: self._call(request, candidate),
+            )
+        ) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def _call(
+        self,
+        request: ChatCompletionRequest,
+        deployment: ModelDeployment,
+    ) -> AsyncGenerator[AdapterChatChunk, None]:
+        adapter_request = self._build_adapter_request(request, deployment)
         with (
             self._adapters.lease(deployment) as adapter,
             metrics.inflight_tracker(
@@ -177,53 +254,14 @@ class ChatService:
                 deployment.id,
             ),
         ):
+            chunks = adapter.stream_chat(adapter_request)
             try:
-                # OpenAI 스트림의 첫 chunk 는 role 만 담는다. 여기에는 content 가 없으므로
-                # TTFT 로 세지 않는다.
-                yield ChatCompletionChunk(
-                    id=completion_id,
-                    created=created,
-                    model=request.model,
-                    choices=[
-                        ChatCompletionChunkChoice(delta=ChatCompletionDelta(role="assistant"))
-                    ],
-                )
-
-                async for chunk in adapter.stream_chat(adapter_req):
-                    if chunk.delta:
-                        # 비어있지 않은 첫 delta 만 TTFT 기준이다.
-                        sw.mark_first_token()
-                        # Phase 6 의 재시도/폴백 차단 플래그. 한 글자라도 나갔으면 되돌릴 수 없다.
-                        ctx.stream_started = True
-                    last_chunk = chunk
-                    yield self._to_openai_chunk(chunk, request, completion_id, created)
-            except (asyncio.CancelledError, GeneratorExit):
-                # 클라이언트가 yield 대기 중에 끊으면 CancelledError 가 아니라
-                # 제너레이터 aclose() 의 GeneratorExit 로 들어온다. 둘 다 이탈이다.
-                self._on_cancelled(request, deployment, ctx, sw, stream=True)
-                raise
-            except Exception as exc:
-                self._on_failed(request, deployment, ctx, exc, stream=True)
-                raise
-
-        timings = self._merge_timings(sw.finish(), last_chunk.timings if last_chunk else None)
-        usage = last_chunk.usage if last_chunk else None
-
-        self._on_completed(
-            request,
-            deployment,
-            AdapterChatResponse(
-                content="",
-                finish_reason=(last_chunk.finish_reason if last_chunk else "error") or "stop",
-                usage=usage or AdapterUsage(),
-                timings=(last_chunk.timings if last_chunk else None) or AdapterTimings(),
-                upstream_model=deployment.upstream_model,
-            ),
-            timings,
-            stream=True,
-        )
-
-    # ── 내부 ────────────────────────────────────────────────────
+                async for chunk in chunks:
+                    yield chunk
+            finally:
+                close = getattr(chunks, "aclose", None)
+                if close is not None:
+                    await close()
 
     def _validate(self, request: ChatCompletionRequest) -> None:
         """미지원 파라미터를 조용히 무시하지 않고 거절한다 (GW-4002).
@@ -271,6 +309,7 @@ class ChatService:
         )
         deployment = decision.deployment
         ctx.routing_decision = decision
+        ctx.resilience_config = snapshot.resilience
         ctx.model = request.model
         ctx.deployment_id = deployment.id
         return deployment
@@ -311,42 +350,6 @@ class ChatService:
             json_output=json_output,
             json_schema=json_schema,
             extra=dict(deployment.extra),
-        )
-
-    async def _aggregate_stream(
-        self,
-        adapter: LLMAdapter,
-        adapter_req: AdapterChatRequest,
-        stopwatch: Stopwatch,
-    ) -> AdapterChatResponse:
-        """streaming 호출을 돌려 하나의 응답으로 합친다.
-
-        non-streaming 요청에서도 TTFT 를 얻기 위한 장치다.
-        (docs/phases/phase-02-instrumentation.md "3.1 TTFT")
-        """
-        parts: list[str] = []
-        finish_reason = "stop"
-        usage = AdapterUsage()
-        timings = AdapterTimings()
-
-        async for chunk in adapter.stream_chat(adapter_req):
-            if chunk.delta:
-                stopwatch.mark_first_token()
-                parts.append(chunk.delta)
-            # 마지막 chunk 에만 실려 오는 값들. 덮어쓰지 말고 있을 때만 보존한다.
-            if chunk.finish_reason:
-                finish_reason = chunk.finish_reason
-            if chunk.usage is not None:
-                usage = chunk.usage
-            if chunk.timings is not None:
-                timings = chunk.timings
-
-        return AdapterChatResponse(
-            content="".join(parts),
-            finish_reason=finish_reason,
-            usage=usage,
-            timings=timings,
-            upstream_model=adapter_req.model,
         )
 
     def _to_openai_response(
