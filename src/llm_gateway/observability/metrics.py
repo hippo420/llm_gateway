@@ -334,4 +334,13 @@ async def metrics_endpoint(request: Request) -> Response:
         extra = await asyncio.to_thread(
             quality_metrics, request.app.state.settings.evaluation_results_path, deployment_ids
         )
+    policy_engine = getattr(request.app.state, "policy_engine", None)
+    if policy_engine is not None:
+        from ..core.errors import ConfigError
+        from ..policy.metrics import policy_metrics
+
+        try:
+            extra += policy_metrics(await policy_engine.state(), set(policy_engine.policies))
+        except ConfigError:
+            pass  # Redis outage must not take down the gateway's existing metrics
     return Response(generate_latest(REGISTRY) + extra, media_type=CONTENT_TYPE_LATEST)

@@ -31,6 +31,7 @@ class DiagnosisEngine:
             (target, rule.id): RuleState() for target, rules in self.rules.items() for rule in rules
         }
         self._current: list[Diagnosis] = []
+        self.last_snapshots: dict[str, SignalSnapshot] = {}
         self.last_evaluated_at: datetime | None = None
         self.query_errors: dict[str, dict[str, str]] = {}
         self.rule_status: dict[str, dict[str, str]] = {}
@@ -42,6 +43,7 @@ class DiagnosisEngine:
 
     def reset(self) -> None:
         self._current = []
+        self.last_snapshots = {}
         self.rule_status = {}
         for state in self.states.values():
             state.consecutive = 0
@@ -82,6 +84,7 @@ class DiagnosisEngine:
             if elapsed > self.config.interval_sec * 2:
                 self.reset()
         self._last_tick = tick
+        self.last_snapshots = dict(snapshots)
         candidates: list[Diagnosis] = []
         statuses: dict[str, dict[str, str]] = {}
         for target in self.config.targets:

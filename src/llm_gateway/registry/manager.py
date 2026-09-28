@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -260,6 +261,42 @@ class ConfigManager:
                 "last_reload_error": self.last_error,
             }
         )
+
+    async def atomic_override_with_state(
+        self,
+        state_key: str,
+        transform: Callable[
+            [str | bytes | None, OverrideDocument, RegistrySnapshot], tuple[str, OverrideDocument]
+        ],
+    ) -> str:
+        """Policy extension of Phase 4: validate first, commit state + patches together."""
+        store = self.source.override
+        if store is None:
+            raise ConfigError("policies require a Redis override store")
+        async with self.lock:
+            base = self.source.base_snapshot
+            if base is None:
+                raise ConfigError("base configuration is not loaded")
+            candidate = self.registry.snapshot
+
+            def update(
+                raw: str | bytes | None, current: OverrideDocument
+            ) -> tuple[str, OverrideDocument]:
+                nonlocal candidate
+                state, document = transform(raw, current, base)
+                candidate = self.source.merge(base, document)
+                return state, document
+
+            try:
+                state, document = await store.update_with_state(state_key, update)
+            except RedisError as exc:
+                raise ConfigError(
+                    "policy transaction unavailable; inspect history before retry"
+                ) from exc
+            self.source.override_document = document
+            self.source.redis_available = True
+            self.apply(candidate, "policy")
+            return state
 
     def sources(self) -> dict[str, Any]:
         return redact(

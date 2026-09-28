@@ -27,6 +27,8 @@ from .diagnosis.signals import PrometheusClient
 from .middleware.access_log import AccessLogMiddleware
 from .middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 from .observability.metrics import metrics_endpoint, record_error
+from .policy.engine import PolicyEngine
+from .policy.models import PolicyConfig
 from .registry.loader import LayeredConfigSource, RedisConfigSource, YamlConfigSource
 from .registry.manager import CONFIG_RELOAD, ConfigManager
 from .registry.models import ModelRegistry
@@ -73,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     diagnosis_client: PrometheusClient | None = None
     diagnosis_task: asyncio.Task | None = None
+    policy_engine: PolicyEngine | None = None
     try:
         config_manager.start(settings.config_reload_sec, settings.config_redis_poll_sec)
         if settings.diagnosis_enabled:
@@ -92,8 +95,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.diagnosis_engine = engine
             diagnosis_task = asyncio.create_task(diagnosis_loop(engine), name="diagnosis")
         app.state.diagnosis_task = diagnosis_task
+        if settings.policy_enabled:
+            if app.state.diagnosis_engine is None or not settings.redis_url or not settings.api_key:
+                raise ValueError("policies require diagnosis, Redis and an admin API key")
+            policy_engine = PolicyEngine(
+                PolicyConfig.load(settings.policy_config_path),
+                config_manager,
+                app.state.diagnosis_engine,
+                settings.evaluation_results_path,
+            )
+            await policy_engine.state()  # unavailable/corrupt audit store must fail startup
+            app.state.policy_engine = policy_engine
+            policy_engine.start()
         yield
     finally:
+        if policy_engine is not None:
+            await policy_engine.close()
+        app.state.policy_engine = None
         await config_manager.close()
         if diagnosis_task is not None:
             diagnosis_task.cancel()
@@ -118,6 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.diagnosis_engine = None
     app.state.config_manager = None
+    app.state.policy_engine = None
 
     app.include_router(v1_router)
     app.include_router(ops_router)

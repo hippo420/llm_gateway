@@ -185,6 +185,36 @@ class RedisConfigSource(ConfigSource[OverrideDocument]):
     async def close(self) -> None:
         await self.client.aclose()
 
+    async def update_with_state(
+        self,
+        state_key: str,
+        transform: Callable[[str | bytes | None, OverrideDocument], tuple[str, OverrideDocument]],
+    ) -> tuple[str, OverrideDocument]:
+        """Commit a control-plane state transition and all override changes atomically."""
+        for _ in range(5):
+            async with self.client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(self.KEY, state_key)
+                    raw_state = await pipe.get(state_key)
+                    current = self.decode(await pipe.get(self.KEY)).active()
+                    state, updated = transform(raw_state, current)
+                    pipe.multi()
+                    pipe.set(state_key, state)  # audit state has no expiration
+                    if updated != current:
+                        if updated.deployments:
+                            expiry = math.ceil(
+                                max(t.timestamp() for t in updated.expires_at.values())
+                            )
+                            pipe.set(self.KEY, updated.model_dump_json(), exat=expiry)
+                        else:
+                            pipe.delete(self.KEY)
+                        pipe.publish(self.CHANNEL, "changed")
+                    await pipe.execute()
+                    return state, updated
+                except WatchError:
+                    continue
+        raise ConfigError("concurrent policy/config updates; retry the request")
+
 
 class LayeredConfigSource(ConfigSource[RegistrySnapshot]):
     """Build a complete candidate. A failed read never changes accepted source views."""

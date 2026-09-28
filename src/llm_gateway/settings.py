@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # --- dynamic config store (Phase 4) ---
     redis_url: str = ""
 
+    # --- human-approved dynamic policies (Phase 9) ---
+    policy_enabled: bool = False
+    policy_config_path: Path = Path("config/policies.yaml")
+
     @property
     def auth_enabled(self) -> bool:
         return bool(self.api_key)

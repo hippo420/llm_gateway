@@ -34,6 +34,8 @@ class ErrorType(StrEnum):
     RATE_LIMITED = "rate_limited"
     REQUEST_CANCELLED = "request_cancelled"
     EVALUATION_NOT_FOUND = "evaluation_not_found"
+    POLICY_CONFLICT = "policy_conflict"
+    POLICY_NOT_FOUND = "policy_not_found"
 
     # GW-5xxx upstream / 내부
     UPSTREAM_ERROR = "upstream_error"
@@ -156,6 +158,18 @@ class RequestCancelledError(GatewayError):
 class EvaluationNotFoundError(GatewayError):
     code = "GW-4008"
     error_type = ErrorType.EVALUATION_NOT_FOUND
+    http_status = 404
+
+
+class PolicyConflictError(GatewayError):
+    code = "GW-4009"
+    error_type = ErrorType.POLICY_CONFLICT
+    http_status = 409
+
+
+class PolicyNotFoundError(GatewayError):
+    code = "GW-4010"
+    error_type = ErrorType.POLICY_NOT_FOUND
     http_status = 404
 
 
