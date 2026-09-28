@@ -188,4 +188,7 @@ def _gateway_headers(ctx: RequestContext) -> dict[str, str]:
         headers[DEPLOYMENT_HEADER] = ctx.deployment_id
     if ctx.fallback_from and ctx.deployment_id:
         headers["X-Gateway-Fallback"] = ctx.deployment_id
+    if ctx.assignment:
+        headers["X-Gateway-Experiment"] = ctx.experiment
+        headers["X-Gateway-Variant"] = ctx.variant
     return headers

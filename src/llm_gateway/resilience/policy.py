@@ -49,6 +49,8 @@ class ResiliencePolicy:
         config: ResilienceConfig,
         ctx: RequestContext,
         call: Callable[[ModelDeployment], AsyncGenerator[AdapterChatChunk, None]],
+        *,
+        admit: Callable[[ModelDeployment], bool] | None = None,
     ) -> AsyncGenerator[AdapterChatChunk, None]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + decision.deployment.timeout.total
@@ -64,6 +66,8 @@ class ResiliencePolicy:
                 initial = original is decision.deployment and ctx.attempt == 0
                 deployment = original if initial else current_candidate(self.registry, original)
                 if deployment is None:
+                    break
+                if not initial and admit is not None and not admit(deployment):
                     break
                 if not initial and self.available is not None and not self.available(deployment):
                     break

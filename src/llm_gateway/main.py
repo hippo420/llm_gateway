@@ -159,6 +159,8 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
     ctx = getattr(request.state, "ctx", None)
     if ctx is None or not ctx.error_recorded:
         record_error(
+            experiment=ctx.experiment if ctx is not None else "none",
+            variant=ctx.variant if ctx is not None else "none",
             model=ctx.model if ctx is not None else None,
             deployment_id=ctx.deployment_id if ctx is not None else None,
             error_type=str(exc.error_type),
@@ -167,11 +169,15 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
         if ctx is not None:
             ctx.error_recorded = True
 
+    headers = {REQUEST_ID_HEADER: request_id} if request_id else {}
+    if ctx is not None and ctx.assignment is not None:
+        headers["X-Gateway-Experiment"] = ctx.experiment
+        headers["X-Gateway-Variant"] = ctx.variant
     return JSONResponse(
         status_code=exc.http_status,
         content=exc.to_error_body(request_id),
         # 예외 경로에서 미들웨어가 헤더를 못 붙이는 구성이 되기 쉽다. 여기서 한 번 더 챙긴다.
-        headers={REQUEST_ID_HEADER: request_id} if request_id else None,
+        headers=headers,
     )
 
 

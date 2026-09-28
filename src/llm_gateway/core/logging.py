@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..settings import Settings
-from .context import current_request_id
+from .context import current_request_id, get_request_context
 
 # LogRecord 의 표준 속성. JsonFormatter 가 extra 필드만 골라내는 데 쓴다.
 _STANDARD_RECORD_KEYS = frozenset(
@@ -32,6 +32,12 @@ class RequestIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if not getattr(record, "request_id", None):
             record.request_id = current_request_id() or "-"
+        ctx = get_request_context()
+        if ctx is not None and ctx.assignment is not None:
+            if not hasattr(record, "experiment"):
+                record.experiment = ctx.experiment
+            if not hasattr(record, "variant"):
+                record.variant = ctx.variant
         return True
 
 

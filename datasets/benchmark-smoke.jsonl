@@ -1,0 +1,2 @@
+{"messages":[{"role":"user","content":"Reply with one word: hello."}],"max_tokens":16,"temperature":0.2}
+{"messages":[{"role":"user","content":"What is 2 plus 2? Reply with just the number."}],"max_tokens":16,"temperature":0.2}

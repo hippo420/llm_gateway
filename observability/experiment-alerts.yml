@@ -1,0 +1,10 @@
+groups:
+  - name: llm-gateway-experiments
+    rules:
+      - alert: LLMExperimentGuardrailStopped
+        expr: llm_gateway_experiment_paused == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Experiment {{ $labels.experiment }} stopped on {{ $labels.instance }}'
+          description: 'Guardrail switched new assignments to control. Inspect /admin/experiments and experiment_guardrail_triggered logs.'

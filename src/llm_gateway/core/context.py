@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ..experiment.assignment import Assignment
     from ..registry.models import ModelDeployment
     from ..resilience.config import ResilienceConfig
     from ..routing.decision import RoutingDecision
@@ -61,6 +62,16 @@ class RequestContext:
     current_deployment: ModelDeployment | None = None
     attempt: int = 0
     fallback_from: str | None = None
+    assignment: Assignment | None = None
+    experiment_recorded: bool = False
+
+    @property
+    def experiment(self) -> str:
+        return self.assignment.experiment if self.assignment else "none"
+
+    @property
+    def variant(self) -> str:
+        return self.assignment.variant if self.assignment else "none"
     # 첫 content를 upstream에서 받았는가. non-stream도 즉시 재시도/폴백 차단.
     stream_started: bool = False
     # errors_total 을 이미 기록했는가 -> 에러 핸들러의 이중 기록 방지 (Phase 2)

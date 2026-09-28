@@ -31,6 +31,7 @@ from ..core.errors import (
     DuplicateDeploymentIdError,
 )
 from ..core.logging import log_event
+from ..experiment.models import Experiment, Identifier
 from ..resilience.config import ResilienceConfig
 from ..routing.config import RoutingConfig
 from .models import (
@@ -295,6 +296,7 @@ class GatewayConfig(BaseModel):
     models: dict[str, RawModel] = Field(min_length=1)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
+    experiments: dict[Identifier, Experiment] = Field(default_factory=dict, max_length=20)
 
 
 def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> None:
@@ -378,6 +380,23 @@ def validate_snapshot(snapshot: RegistrySnapshot, known_adapters: set[str]) -> N
                 total_weight=total_weight,
             )
 
+    active_models: set[str] = set()
+    if "none" in snapshot.experiments:
+        raise ConfigError("experiment name 'none' is reserved")
+    for experiment in snapshot.experiments.values():
+        if any(v.name == "none" for v in experiment.variants):
+            raise ConfigError("variant name 'none' is reserved")
+        if any(v.deployment_id not in seen for v in experiment.variants):
+            raise ConfigError("experiment references an unknown deployment")
+        models = {seen[v.deployment_id] for v in experiment.variants}
+        if len(models) != 1:
+            raise ConfigError("experiment variants must belong to one logical model")
+        if experiment.enabled:
+            model = next(iter(models))
+            if model in active_models:
+                raise ConfigError("only one enabled experiment per logical model is allowed")
+            active_models.add(model)
+
     health = snapshot.routing.health_aware
     if health is not None:
         unknown = set(health.thresholds) - seen.keys()
@@ -434,4 +453,8 @@ def _parse_yaml(raw: dict[str, Any]) -> RegistrySnapshot:
         defaults_options=defaults_options,
         routing=RoutingConfig.model_validate(raw.get("routing") or {}),
         resilience=ResilienceConfig.model_validate(raw.get("resilience") or {}),
+        experiments={
+            key: Experiment.model_validate(value)
+            for key, value in (raw.get("experiments") or {}).items()
+        },
     )

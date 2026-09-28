@@ -21,6 +21,7 @@ services:
     ports: ["${PROMETHEUS_PORT:-9090}:9090"]
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/experiment-alerts.yml:/etc/prometheus/experiment-alerts.yml:ro
       - prometheus-data:/prometheus
     extra_hosts: ["host.docker.internal:host-gateway"]
 

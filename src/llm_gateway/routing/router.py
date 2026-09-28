@@ -4,6 +4,7 @@ import logging
 
 from ..core.errors import NoAvailableDeploymentError
 from ..core.logging import log_event
+from ..experiment.assignment import Assignment
 from ..observability.metrics import ROUTING_DECISIONS, ROUTING_NO_CANDIDATE
 from ..registry.models import ModelRegistry, RegistrySnapshot
 from ..resilience.breaker import CircuitBreakers
@@ -38,6 +39,7 @@ class ModelRouter:
         ctx: RoutingContext,
         *,
         snapshot: RegistrySnapshot | None = None,
+        assignment: Assignment | None = None,
     ) -> RoutingDecision:
         snapshot = snapshot or self.registry.snapshot
         self.health.sync(snapshot)
@@ -46,7 +48,41 @@ class ModelRouter:
             if self.breakers is not None:
                 self.breakers.sync(snapshot)
                 candidates = [d for d in candidates if self.breakers.available(d)]
-            decision = self.strategies[snapshot.routing.strategy].select(ctx, candidates)
+            if assignment is not None:
+                experiment = snapshot.experiments[assignment.experiment]
+                permitted = {
+                    v.deployment_id
+                    for v in experiment.variants
+                    if (v.name == experiment.control if assignment.paused else v.weight > 0)
+                }
+                eligible = {
+                    d.id: d
+                    for d in candidates
+                    if d.id in permitted
+                    and d.weight > 0
+                    and (
+                        snapshot.routing.strategy != "health_aware"
+                        or not self.health.assess(d).excluded
+                    )
+                }
+                order = [assignment.deployment_id] + [
+                    v.deployment_id
+                    for v in sorted(
+                        experiment.variants, key=lambda v: (v.name != experiment.control, v.name)
+                    )
+                    if v.deployment_id != assignment.deployment_id
+                ]
+                ordered = [eligible[name] for name in order if name in eligible]
+                if not ordered:
+                    raise NoAvailableDeploymentError("no eligible experiment deployment")
+                decision = RoutingDecision(
+                    ordered[0],
+                    "experiment_control" if assignment.paused else "experiment_bucket",
+                    "experiment",
+                    tuple(ordered[1:]),
+                )
+            else:
+                decision = self.strategies[snapshot.routing.strategy].select(ctx, candidates)
         except NoAvailableDeploymentError:
             # Only registered model names reach this branch; unknown names stay out of labels.
             ROUTING_NO_CANDIDATE.labels(ctx.model).inc()

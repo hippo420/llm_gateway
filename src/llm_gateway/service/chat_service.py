@@ -43,6 +43,7 @@ from ..core.errors import (
 )
 from ..core.logging import log_event
 from ..core.timing import ChatTimings, Stopwatch
+from ..experiment.manager import ExperimentManager
 from ..observability import metrics
 from ..registry.models import ModelDeployment, ModelRegistry
 from ..resilience.breaker import CircuitBreakers
@@ -90,6 +91,7 @@ class ChatService:
         self._adapters = adapters
         self._breakers = CircuitBreakers()
         self._health = HealthTracker(registry)
+        self._experiments = ExperimentManager(registry)
         self._router = ModelRouter(registry, self._breakers, self._health)
         self._policy = ResiliencePolicy(
             registry, self._breakers, observe=self._health.observe, available=self._health.available
@@ -99,6 +101,9 @@ class ChatService:
 
     def routing_status(self) -> dict[str, Any]:
         return self._health.report()
+
+    def experiment_status(self) -> dict[str, Any]:
+        return self._experiments.report()
 
     def prepare(
         self,
@@ -114,6 +119,7 @@ class ChatService:
             self._validate(request)
             return self._select(request, ctx, headers)
         except GatewayError as exc:
+            self._experiments.record(ctx, "error")
             # deployment 가 없으므로 requests_total 은 올리지 않는다. 에러 카운터만.
             self._record_error(exc, ctx, model=self._model_label(request.model), deployment=None)
             raise
@@ -157,7 +163,7 @@ class ChatService:
             upstream_model=actual.upstream_model,
         )
         timings = self._merge_timings(sw.finish(), upstream_timings)
-        self._on_completed(request, actual, response, timings, stream=False)
+        self._on_completed(request, actual, response, timings, ctx=ctx, stream=False)
         return ChatResult(
             self._to_openai_response(response, request, ctx), actual, timings, usage.source
         )
@@ -219,6 +225,7 @@ class ChatService:
                 upstream_model=actual.upstream_model,
             ),
             self._merge_timings(sw.finish(), upstream_timings),
+            ctx=ctx,
             stream=True,
         )
 
@@ -236,6 +243,7 @@ class ChatService:
                 config,
                 ctx,
                 lambda candidate: self._call(request, candidate),
+                admit=lambda candidate: self._experiments.admits(ctx, candidate.id),
             )
         ) as chunks:
             async for chunk in chunks:
@@ -287,6 +295,8 @@ class ChatService:
         header_name = snapshot.routing.bucket_header.lower()
         if headers is not None:
             hints = {key.lower(): value for key, value in headers.items()}
+            ctx.session_id = sanitize_header_value(hints.get("x-session-id"))
+            ctx.user_bucket = sanitize_header_value(hints.get("x-user-bucket"))
             primary = sanitize_header_value(hints.get(header_name))
             user_bucket = sanitize_header_value(hints.get("x-user-bucket"))
         else:
@@ -296,6 +306,7 @@ class ChatService:
             user_bucket = sanitize_header_value(ctx.user_bucket)
         bucket_key = primary or user_bucket or ctx.request_id
         source = "primary_header" if primary else "user_bucket" if user_bucket else "request_id"
+        ctx.assignment = self._experiments.assign(request.model, ctx, snapshot)
         decision = self._router.route(
             RoutingContext(
                 model=request.model,
@@ -306,12 +317,15 @@ class ChatService:
                 max_tokens=request.max_tokens,
             ),
             snapshot=snapshot,
+            assignment=ctx.assignment,
         )
         deployment = decision.deployment
         ctx.routing_decision = decision
         ctx.resilience_config = snapshot.resilience
         ctx.model = request.model
         ctx.deployment_id = deployment.id
+        if ctx.assignment and ctx.assignment.deployment_id != deployment.id:
+            ctx.fallback_from = ctx.assignment.deployment_id
         return deployment
 
     def _build_adapter_request(
@@ -427,15 +441,19 @@ class ChatService:
         adapter_response: AdapterChatResponse,
         timings: ChatTimings,
         *,
+        ctx: RequestContext,
         stream: bool,
     ) -> None:
         """요청당 LLM 요약 로그 1줄 + metric. 프롬프트/응답 원문은 넣지 않는다."""
         usage = adapter_response.usage
+        self._experiments.record(ctx, "success", timings, usage.input_tokens, usage.output_tokens)
         log_event(
             log,
             "chat_completed",
             model=request.model,
             deployment_id=deployment.id,
+            experiment=ctx.experiment,
+            variant=ctx.variant,
             adapter=deployment.adapter,
             upstream_model=deployment.upstream_model,
             stream=stream,
@@ -453,6 +471,8 @@ class ChatService:
             output_tps=_round(timings.output_tps(usage.output_tokens)),
         )
         metrics.record_request(
+            experiment=ctx.experiment,
+            variant=ctx.variant,
             model=request.model,
             deployment_id=deployment.id,
             adapter=deployment.adapter,
@@ -475,9 +495,12 @@ class ChatService:
         stream: bool,
     ) -> None:
         """adapter 호출 실패. 로그는 에러 핸들러/SSE 인코더가 남기므로 metric 만 기록한다."""
+        self._experiments.record(ctx, "error")
         error = exc if isinstance(exc, GatewayError) else InternalError("internal error")
         self._record_error(error, ctx, model=request.model, deployment=deployment)
         metrics.record_request(
+            experiment=ctx.experiment,
+            variant=ctx.variant,
             model=request.model,
             deployment_id=deployment.id,
             adapter=deployment.adapter,
@@ -503,6 +526,7 @@ class ChatService:
 
         error rate 에 섞이지 않도록 status="cancelled" 로 기록한다.
         """
+        self._experiments.record(ctx, "cancelled")
         cancelled = RequestCancelledError("client closed the connection")
         log_event(
             log,
@@ -518,6 +542,8 @@ class ChatService:
         )
         self._record_error(cancelled, ctx, model=request.model, deployment=deployment)
         metrics.record_request(
+            experiment=ctx.experiment,
+            variant=ctx.variant,
             model=request.model,
             deployment_id=deployment.id,
             adapter=deployment.adapter,
@@ -543,6 +569,8 @@ class ChatService:
         표시가 없으면 main.gateway_error_handler 가 같은 에러를 한 번 더 센다.
         """
         metrics.record_error(
+            experiment=ctx.experiment,
+            variant=ctx.variant,
             model=model,
             deployment_id=deployment.id if deployment else None,
             error_type=str(error.error_type),

@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.errors import ModelNotFoundError, NoAvailableDeploymentError
+from ..experiment.models import Experiment, Identifier
 from ..resilience.config import ResilienceConfig
 from ..routing.config import RoutingConfig
 
@@ -109,6 +110,7 @@ class RegistrySnapshot(BaseModel):
     # 요청 선택과 실행 정책을 같은 스냅샷에 담는다.
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
+    experiments: dict[Identifier, Experiment] = Field(default_factory=dict, max_length=20)
 
 
 class ModelRegistry:

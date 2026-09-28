@@ -31,6 +31,8 @@ ADAPTER = "fake"
 
 def _value(name: str, **labels: str) -> float:
     """아직 한 번도 기록되지 않은 시계열은 None 이 아니라 0 으로 본다."""
+    if name != "llm_gateway_inflight_requests":
+        labels = {"experiment": "none", "variant": "none", **labels}
     return REGISTRY.get_sample_value(name, labels) or 0.0
 
 

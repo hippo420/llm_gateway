@@ -4,6 +4,9 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+rule_files:
+  - /etc/prometheus/experiment-alerts.yml
+
 scrape_configs:
   # GATEWAY_PORT 를 바꿨다면 여기도 맞출 것.
   - job_name: llm-gateway

@@ -15,23 +15,26 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 6 코드 구현 완료.** 제한적 Retry/Fallback, 요청 전체 시간 제한, 배포별 Circuit Breaker를 적용했다. 실제 서버 장애 실측과 Phase 3 baseline 검증은 남아 있다.
+**Phase 7 코드 구현 완료.** 해시 기반 A/B 할당, guardrail 자동 중단, 실험별 비교 지표와 시간 분할 벤치마크를 추가했다. 실제 Ollama/vLLM 비교와 품질 검증은 남아 있다.
 
 - `pytest` — **실제 Ollama 없이 돈다** (R1~R6 진단 재현 테스트 포함)
-- `GET /metrics` 로 L1/L2·설정·라우팅·복원력 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 8종)
+- `GET /metrics` 로 L1/L2·설정·라우팅·복원력·실험 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 9종)
 - `GET /admin/diagnosis`로 규칙 기반 진단 조회. baseline 설정 후 `GATEWAY_DIAGNOSIS_ENABLED=true`
 - YAML 감시, Redis 임시 override/TTL/pub-sub, 검증 후 무중단 설정 교체
 - 세션 해시 기반 Weighted 분배, 선택 이유/대체 후보 보존, Redis weight/disable 즉시 반영
 - HealthAware 옵션: 배포별 오류율/P95로 후보 제외, `/admin/routing/status`에서 관측 상태 조회
 - 첫 토큰 수신 전 제한적 재시도/폴백, 실제 처리 배포의 응답 헤더, 취소 시 upstream 정리
 - SSE 전송 중 연결 종료도 감시해 upstream 정지/느린 클라이언트 상황에서 즉시 취소
+- 실험 우선 할당, warm-up/fallback 분리 집계, guardrail 위반 후 control 전환
+- `GET /admin/experiments` 실험 보고서, `scripts/benchmark.py` 고정 배포 순차 벤치마크
 - `/admin/config`에서 유효 설정 조회. 모든 `/admin` API는 `GATEWAY_API_KEY` 설정 및 Bearer 인증 필수
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
   [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md) ·
   [Phase 3](docs/phases/phase-03-implementation.md) · [Phase 4](docs/phases/phase-04-implementation.md) ·
-  [Phase 5](docs/phases/phase-05-implementation.md) · [Phase 6](docs/phases/phase-06-implementation.md)
+  [Phase 5](docs/phases/phase-05-implementation.md) · [Phase 6](docs/phases/phase-06-implementation.md) ·
+  [Phase 7](docs/phases/phase-07-implementation.md)
 
-다음 구현은 **Phase 7 A/B 테스트**다.
+다음 구현은 **Phase 8 품질 평가**다. 운영 서빙 선택은 성능/자원/품질 실측 후 결정한다.
 
 ---
 
@@ -141,6 +144,28 @@ fallback/breaker 비활성이다. fallback을 켜면 Router의 대체 후보를 
 
 ---
 
+### A/B 실험 (Phase 7)
+
+`config/gateway.yaml`의 `experiments`에 동일 논리 모델에 속한 배포들을 등록하면 일반
+Router보다 실험 할당을 우선한다. 기본 설정은 빈 목록으로 실험 비활성이다.
+실험의 `bucket_key`는 `session_id`(`X-Session-Id`), `user_id`(`X-User-Bucket`),
+`request_id` 중 하나다. 키가 없거나 유효하지 않으면 request_id를 사용한다.
+`X-Gateway-Experiment`/`X-Gateway-Variant`는 최초 할당, `X-Gateway-Deployment`는 실제 배포다.
+
+Guardrail은 최소 표본을 채운 뒤 오류율/TTFT P95 기준 초과 시 신규 요청을 control로 전환한다.
+상태와 보고서는 worker별 메모리이며 재시작 시 초기화된다. 중단 알림은 구조화 로그와
+Prometheus alert rule로 제공한다. 외부 알림 수신 채널은 별도 설정해야 한다.
+
+한 GPU에서는 준비된 배포를 각각 시간 분할로 측정한다. 아래 smoke 데이터셋은 기능 확인용이다.
+
+```powershell
+.venv/Scripts/python.exe scripts/benchmark.py --deployment qwen-7b@ollama --dataset datasets/benchmark-smoke.jsonl --concurrency 1,4,8 --repeat 10 --warmup 2 --out operations/results/ollama-smoke.json
+```
+
+원자료 JSON과 Markdown 보고서를 함께 저장한다. 이 명령은 실제 모델을 호출하며, 벤치마크는
+retry/fallback 없이 지정 배포를 측정한다. 현재 vLLM adapter는 미구현이므로 실제 vLLM 비교에는
+adapter와 서버 준비가 필요하다. 설정 예제와 한계는 [Phase 7 기록](docs/phases/phase-07-implementation.md)을 참고한다.
+
 ## 구조
 
 ```text
@@ -154,6 +179,7 @@ src/llm_gateway/
 ├── middleware/              request_id, access log
 ├── registry/                Model Registry, Config loader
 ├── routing/                 ModelRouter, Static/Weighted/HealthAware, RoutingDecision
+├── experiment/              실험 스키마, 할당, guardrail, 보고서, 벤치마크
 ├── resilience/              Retry/Fallback/Timeout/Circuit Breaker
 ├── adapters/                LLMAdapter ABC + Ollama 구현
 ├── service/                 ChatService (오케스트레이션)

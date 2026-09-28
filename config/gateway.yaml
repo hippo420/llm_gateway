@@ -91,6 +91,10 @@ routing:
   # health_aware는 배포별 실측 임계값을 명시해야 선택 가능하다.
   # 설정/표본/복귀 규칙: docs/phases/phase-05-health-aware.md
 
+# ── Phase 7: 준비된 동일 논리 모델의 배포로 실험을 명시적으로 등록 ──
+# 설정 예제/guardrail/단일 GPU 시간 분할: docs/phases/phase-07-implementation.md
+experiments: {}
+
 # ── Phase 6 ────────────────────────────────────────────────────
 resilience:
   retry:

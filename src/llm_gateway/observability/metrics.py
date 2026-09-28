@@ -95,22 +95,59 @@ FINISH_REASONS: Final = frozenset({"stop", "length", "error", "cancelled"})
 # upstream 이 위 집합 밖의 값을 주면 (Ollama done_reason="load" 등) 여기로 모은다.
 FINISH_REASON_OTHER: Final = "other"
 
+EXPERIMENT_RESULTS = Counter(
+    "llm_gateway_experiment_result_total",
+    "Experiment outcomes including exclusions.",
+    ["experiment", "variant", "outcome"],
+)
+EXPERIMENT_PAUSED = Gauge(
+    "llm_gateway_experiment_paused", "Guardrail stop latched in this process.", ["experiment"]
+)
+EXPERIMENT_GUARDRAILS = Counter(
+    "llm_gateway_experiment_guardrail_total",
+    "Latched guardrail violations.",
+    ["experiment", "variant", "reason"],
+)
+EXPERIMENT_TTFT = Histogram(
+    "llm_gateway_experiment_ttft_seconds",
+    "Measured successes without fallback or warmup.",
+    ["experiment", "variant"],
+    buckets=TTFT_BUCKETS,
+)
+EXPERIMENT_LATENCY = Histogram(
+    "llm_gateway_experiment_latency_seconds",
+    "Measured successes without fallback or warmup.",
+    ["experiment", "variant"],
+    buckets=LATENCY_BUCKETS,
+)
+EXPERIMENT_TPS = Histogram(
+    "llm_gateway_experiment_output_tokens_per_second",
+    "Measured output TPS.",
+    ["experiment", "variant"],
+    buckets=TPS_BUCKETS,
+)
+EXPERIMENT_TOKENS = Counter(
+    "llm_gateway_experiment_tokens_total",
+    "Measured successful token usage.",
+    ["experiment", "variant", "direction"],
+)
+
 # ── L1 Application ──────────────────────────────────────────────
 
 REQUESTS_TOTAL = Counter(
     "llm_gateway_requests_total",
     "Chat requests that reached a deployment.",
-    ["model", "deployment_id", "adapter", "stream", "status"],
+    ["model", "deployment_id", "adapter", "stream", "status", "experiment", "variant"],
 )
 ERRORS_TOTAL = Counter(
     "llm_gateway_errors_total",
     "Gateway errors by error-codes.md enum.",
-    ["model", "deployment_id", "error_type", "code"],
+    ["model", "deployment_id", "error_type", "code", "experiment", "variant"],
 )
 REQUEST_DURATION = Histogram(
     "llm_gateway_request_duration_seconds",
     "Adapter call start to last chunk, successful requests only.",
-    ["model", "deployment_id", "stream"],
+    ["model", "deployment_id", "stream", "experiment", "variant"],
     buckets=LATENCY_BUCKETS,
 )
 INFLIGHT = Gauge(
@@ -124,55 +161,55 @@ INFLIGHT = Gauge(
 TTFT = Histogram(
     "llm_gateway_ttft_seconds",
     "Time to first non-empty content chunk.",
-    ["model", "deployment_id", "adapter"],
+    ["model", "deployment_id", "adapter", "experiment", "variant"],
     buckets=TTFT_BUCKETS,
 )
 GENERATION_DURATION = Histogram(
     "llm_gateway_generation_duration_seconds",
     "Total latency minus TTFT (decode phase).",
-    ["model", "deployment_id"],
+    ["model", "deployment_id", "experiment", "variant"],
     buckets=GENERATION_BUCKETS,
 )
 QUEUE_DURATION = Histogram(
     "llm_gateway_queue_duration_seconds",
     "Upstream queue wait, only when the serving framework reports it.",
-    ["model", "deployment_id"],
+    ["model", "deployment_id", "experiment", "variant"],
     buckets=TTFT_BUCKETS,
 )
 OUTPUT_TPS = Histogram(
     "llm_gateway_output_tokens_per_second",
     "Per-request output tokens / generation seconds.",
-    ["model", "deployment_id", "adapter"],
+    ["model", "deployment_id", "adapter", "experiment", "variant"],
     buckets=TPS_BUCKETS,
 )
 INPUT_TOKENS_TOTAL = Counter(
     "llm_gateway_input_tokens_total",
     "Input (prompt) tokens.",
-    ["model", "deployment_id", "token_source"],
+    ["model", "deployment_id", "token_source", "experiment", "variant"],
 )
 OUTPUT_TOKENS_TOTAL = Counter(
     "llm_gateway_output_tokens_total",
     "Output (completion) tokens.",
-    ["model", "deployment_id", "token_source"],
+    ["model", "deployment_id", "token_source", "experiment", "variant"],
 )
 # 이름에 request_ 를 붙인 이유: Counter "..._input_tokens_total" 의 family 이름이
 # "..._input_tokens" 라서, 같은 이름의 Histogram 은 등록 자체가 안 된다 (OpenMetrics 규칙).
 INPUT_TOKENS = Histogram(
     "llm_gateway_request_input_tokens",
     "Input tokens per request.",
-    ["model", "deployment_id"],
+    ["model", "deployment_id", "experiment", "variant"],
     buckets=INPUT_TOKEN_BUCKETS,
 )
 OUTPUT_TOKENS = Histogram(
     "llm_gateway_request_output_tokens",
     "Output tokens per request.",
-    ["model", "deployment_id"],
+    ["model", "deployment_id", "experiment", "variant"],
     buckets=OUTPUT_TOKEN_BUCKETS,
 )
 FINISH_REASON_TOTAL = Counter(
     "llm_gateway_finish_reason_total",
     "Finish reasons. A high 'length' ratio means max_tokens is too small.",
-    ["model", "deployment_id", "finish_reason"],
+    ["model", "deployment_id", "finish_reason", "experiment", "variant"],
 )
 
 
@@ -188,6 +225,8 @@ def record_request(
     output_tokens: int | None,
     token_source: str,
     finish_reason: str | None,
+    experiment: str = "none",
+    variant: str = "none",
 ) -> None:
     """한 요청의 계측을 기록한다. ChatService 가 요청 종료 시 한 번 호출한다.
 
@@ -198,38 +237,54 @@ def record_request(
       실패는 requests_total{status="error"} 와 errors_total 로 본다.
     """
     stream_label = "true" if stream else "false"
-    REQUESTS_TOTAL.labels(model, deployment_id, adapter, stream_label, status).inc()
+    REQUESTS_TOTAL.labels(
+        model, deployment_id, adapter, stream_label, status, experiment, variant
+    ).inc()
     if finish_reason is not None:
         FINISH_REASON_TOTAL.labels(
-            model, deployment_id, normalize_finish_reason(finish_reason)
+            model, deployment_id, normalize_finish_reason(finish_reason), experiment, variant
         ).inc()
 
     if status != STATUS_SUCCESS or timings is None:
         return
 
     if timings.total_sec is not None:
-        REQUEST_DURATION.labels(model, deployment_id, stream_label).observe(timings.total_sec)
+        REQUEST_DURATION.labels(model, deployment_id, stream_label, experiment, variant).observe(
+            timings.total_sec
+        )
     if timings.ttft_sec is not None:
-        TTFT.labels(model, deployment_id, adapter).observe(timings.ttft_sec)
+        TTFT.labels(model, deployment_id, adapter, experiment, variant).observe(timings.ttft_sec)
     if timings.generation_sec is not None:
-        GENERATION_DURATION.labels(model, deployment_id).observe(timings.generation_sec)
+        GENERATION_DURATION.labels(model, deployment_id, experiment, variant).observe(
+            timings.generation_sec
+        )
     if timings.queue_sec is not None:
-        QUEUE_DURATION.labels(model, deployment_id).observe(timings.queue_sec)
+        QUEUE_DURATION.labels(model, deployment_id, experiment, variant).observe(timings.queue_sec)
 
     tps = timings.output_tps(output_tokens)
     if tps is not None:
-        OUTPUT_TPS.labels(model, deployment_id, adapter).observe(tps)
+        OUTPUT_TPS.labels(model, deployment_id, adapter, experiment, variant).observe(tps)
 
     if input_tokens is not None:
-        INPUT_TOKENS_TOTAL.labels(model, deployment_id, token_source).inc(input_tokens)
-        INPUT_TOKENS.labels(model, deployment_id).observe(input_tokens)
+        INPUT_TOKENS_TOTAL.labels(model, deployment_id, token_source, experiment, variant).inc(
+            input_tokens
+        )
+        INPUT_TOKENS.labels(model, deployment_id, experiment, variant).observe(input_tokens)
     if output_tokens is not None:
-        OUTPUT_TOKENS_TOTAL.labels(model, deployment_id, token_source).inc(output_tokens)
-        OUTPUT_TOKENS.labels(model, deployment_id).observe(output_tokens)
+        OUTPUT_TOKENS_TOTAL.labels(model, deployment_id, token_source, experiment, variant).inc(
+            output_tokens
+        )
+        OUTPUT_TOKENS.labels(model, deployment_id, experiment, variant).observe(output_tokens)
 
 
 def record_error(
-    *, model: str | None, deployment_id: str | None, error_type: str, code: str
+    *,
+    model: str | None,
+    deployment_id: str | None,
+    error_type: str,
+    code: str,
+    experiment: str = "none",
+    variant: str = "none",
 ) -> None:
     """에러 카운터 증가.
 
@@ -238,7 +293,12 @@ def record_error(
     model 은 **등록된 논리 모델명**이거나 None 이어야 한다 (None -> "unknown").
     """
     ERRORS_TOTAL.labels(
-        model or UNKNOWN_MODEL, deployment_id or NO_DEPLOYMENT, error_type, code
+        model or UNKNOWN_MODEL,
+        deployment_id or NO_DEPLOYMENT,
+        error_type,
+        code,
+        experiment,
+        variant,
     ).inc()
 
 
