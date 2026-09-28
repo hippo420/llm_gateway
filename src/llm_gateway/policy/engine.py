@@ -75,6 +75,8 @@ class PolicyEngine:
             for check in policy.validation.checks:
                 if check.deployment_id not in self.targets:
                     raise ValueError("validation requires a configured diagnosis target")
+                if self.targets[check.deployment_id].queries:
+                    raise ValueError("policy validation requires standard five-minute queries")
         self._task: asyncio.Task | None = None
 
     async def state(self) -> PolicyState:
@@ -522,7 +524,8 @@ class PolicyEngine:
                         < record.policy.validation.observe_sec
                         + self.diagnosis.config.interval_sec * 2
                     ):
-                        continue  # allow the next diagnosis scrape to cover the full observation window
+                        # Allow the next scrape to cover the full observation window.
+                        continue
                     if record.validation_result["passed"]:
                         # Passing metrics cannot bless a configuration that changed behind our back.
                         owned = fingerprint(base) == record.base_hash and all(

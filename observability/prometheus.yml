@@ -6,6 +6,7 @@ global:
 
 rule_files:
   - /etc/prometheus/experiment-alerts.yml
+  - /etc/prometheus/policy-alerts.yml
 
 scrape_configs:
   # GATEWAY_PORT 를 바꿨다면 여기도 맞출 것.

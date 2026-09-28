@@ -13,8 +13,10 @@ services:
     image: redis:7-alpine
     profiles: [config]
     ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
-    # Override is temporary; YAML remains the source of truth.
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Overrides retain TTL; Phase 9 audit history must survive container recreation.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
 
   prometheus:
     image: prom/prometheus:latest
@@ -22,6 +24,7 @@ services:
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/experiment-alerts.yml:/etc/prometheus/experiment-alerts.yml:ro
+      - ./observability/policy-alerts.yml:/etc/prometheus/policy-alerts.yml:ro
       - prometheus-data:/prometheus
     extra_hosts: ["host.docker.internal:host-gateway"]
 
@@ -57,5 +60,6 @@ services:
               capabilities: [gpu, utility]
 
 volumes:
+  redis-data:
   prometheus-data:
   grafana-data:

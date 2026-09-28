@@ -341,6 +341,12 @@ async def metrics_endpoint(request: Request) -> Response:
 
         try:
             extra += policy_metrics(await policy_engine.state(), set(policy_engine.policies))
+            store_up = 1
         except ConfigError:
-            pass  # Redis outage must not take down the gateway's existing metrics
+            store_up = 0  # Keep other metrics available, but expose the audit-store failure.
+        extra += (
+            "# HELP llm_gateway_policy_store_up Policy audit store is readable.\n"
+            "# TYPE llm_gateway_policy_store_up gauge\n"
+            f"llm_gateway_policy_store_up {store_up}\n"
+        ).encode()
     return Response(generate_latest(REGISTRY) + extra, media_type=CONTENT_TYPE_LATEST)

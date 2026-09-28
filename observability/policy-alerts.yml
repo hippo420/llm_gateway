@@ -1,0 +1,26 @@
+groups:
+  - name: gateway-policy
+    rules:
+      - alert: GatewayPolicyAuditUnavailable
+        expr: llm_gateway_policy_store_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Policy audit store is unavailable or corrupt'
+          description: 'Approval and rollback require Redis recovery. Inspect Gateway logs.'
+      - alert: GatewayPolicyApprovalPending
+        expr: llm_gateway_policy_pending > 0
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: 'Policy {{ $labels.policy_id }} requires human approval'
+          description: 'Inspect authenticated GET /admin/recommendations. No automatic approval.'
+      - alert: GatewayPolicyRollbackConflict
+        expr: llm_gateway_policy_rollback_conflicts > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Policy {{ $labels.policy_id }} needs rollback review'
+          description: 'Configuration changed after approval. Inspect /admin/policy-history.'

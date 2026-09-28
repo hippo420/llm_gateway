@@ -127,6 +127,8 @@ class PolicyConfig(StrictModel):
     def unique(self) -> Self:
         if len({p.id for p in self.policies}) != len(self.policies):
             raise ValueError("duplicate policy ID")
+        if any(p.id == "retired" for p in self.policies):
+            raise ValueError("policy ID 'retired' is reserved for historical metrics")
         return self
 
     @classmethod

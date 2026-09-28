@@ -15,7 +15,7 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 8 코드 구현 완료.** 배치 품질 평가, 규칙·임베딩·LLM judge 채점, 사람 평가 상관 검증 도구와 성능·품질 통합 보고서를 추가했다. 실제 서비스 데이터 및 실제 모델·사람 채점 검증은 남아 있다.
+**Phase 9 코드 구현 완료.** 진단 기반 제안, 사람 승인·거부, Redis 원자적 적용·감사 이력, 관찰 후 검증·조건부 롤백을 추가했다. Phase 8의 실제 서비스 데이터·사람 채점 검증과 Phase 9 운영 승인 이력 검증은 남아 있다.
 
 - `pytest` — **실제 Ollama 없이 돈다** (R1~R6 진단 재현 테스트 포함)
 - `GET /metrics` 로 L1/L2·설정·라우팅·복원력·실험·품질 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 10종)
@@ -35,7 +35,8 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
   [Phase 5](docs/phases/phase-05-implementation.md) · [Phase 6](docs/phases/phase-06-implementation.md) ·
   [Phase 7](docs/phases/phase-07-implementation.md) · [Phase 8](docs/phases/phase-08-implementation.md)
 
-다음 구현은 **Phase 9 동적 정책**이다. 운영 서빙 선택은 성능/자원/품질 실측 후 결정한다.
+Phase 9 실행 및 한계: [구현·검증 기록](operations/results/2026-09-28-phase09-validation.md).
+**Phase 10 자동 승인에는 아직 진입하지 않는다.** 운영 승인·거부 최소 10건과 잘못된 제안의 거부 이유 분석이 필요하다. 운영 서빙 선택은 성능/자원/품질 실측 후 결정한다.
 
 ---
 

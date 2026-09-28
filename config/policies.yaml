@@ -1,0 +1,35 @@
+# Disabled by default. Calibrate diagnosis targets before enabling any policy.
+# Restart Gateway to load changes to this file.
+interval_sec: 15
+max_active: 1
+max_changes_per_hour: 4
+max_pending: 20
+policies: []
+
+# Example only: both deployments must be enabled under the SAME logical model,
+# weighted routing must be configured, and the validation target must exist.
+# policies:
+#   - id: SHIFT_ON_UPSTREAM_ERROR
+#     trigger_rule_id: UPSTREAM_ANOMALY
+#     deployment_id: model@primary
+#     actions:
+#       - {type: adjust_weight, target: model@primary, delta: -20}
+#       - {type: adjust_weight, target: model@secondary, delta: 20}
+#     guard:
+#       require_approval: true
+#       max_change_per_hour: 2
+#       cooldown_sec: 900
+#       min_weight: 10
+#       max_weight: 100
+#     validation:
+#       observe_sec: 600
+#       checks:
+#         - deployment_id: model@primary
+#           min_samples: 20
+#           conditions: [{signal: error_rate, op: '<', threshold: 0.03}]
+#         - deployment_id: model@secondary
+#           min_samples: 20
+#           conditions: [{signal: error_rate, op: '<', threshold: 0.03}]
+#     expected_effect: Reduce errors by shifting traffic to the healthy deployment.
+#     recommendation_ttl_sec: 900
+#     override_ttl_sec: 3600

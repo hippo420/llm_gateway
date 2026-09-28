@@ -1,0 +1,257 @@
+{
+  "uid": "llm-policies",
+  "title": "LLM Gateway / Policies",
+  "tags": [
+    "llm-gateway",
+    "policy"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "15s",
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Pending human approval",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_policy_pending",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Under observation",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_policy_active",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Rollback conflicts",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_policy_rollback_conflicts",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Audit store available",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_policy_store_up",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Recorded decisions",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_recommendation_total",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Completed rollbacks",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_policy_rollback_total",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Deployment weights",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_deployment_weight",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Traffic by deployment",
+      "description": "Read-only monitoring. Approval requires authenticated admin API and a reason. Redis audit counters are shared: do not sum replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deployment_id) (rate(llm_gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    }
+  ]
+}
