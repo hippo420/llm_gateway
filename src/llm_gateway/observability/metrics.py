@@ -18,6 +18,7 @@ Label 규칙 (반드시 지킬 것):
 
 from __future__ import annotations
 
+import asyncio
 from typing import Final
 
 from prometheus_client import (
@@ -322,4 +323,15 @@ async def metrics_endpoint(request: Request) -> Response:
     make_asgi_app() 을 mount 하면 "/metrics" 가 "/metrics/" 로 307 리다이렉트된다.
     curl 확인이 번거로워지므로 일반 route 로 붙인다.
     """
-    return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+    from ..evaluation.metrics import quality_metrics
+
+    extra = b""
+    registry = getattr(request.app.state, "registry", None)
+    if registry is not None:
+        deployment_ids = {
+            d.id for model in registry.snapshot.models.values() for d in model.deployments
+        }
+        extra = await asyncio.to_thread(
+            quality_metrics, request.app.state.settings.evaluation_results_path, deployment_ids
+        )
+    return Response(generate_latest(REGISTRY) + extra, media_type=CONTENT_TYPE_LATEST)

@@ -33,6 +33,7 @@ class ErrorType(StrEnum):
     UNAUTHORIZED = "unauthorized"
     RATE_LIMITED = "rate_limited"
     REQUEST_CANCELLED = "request_cancelled"
+    EVALUATION_NOT_FOUND = "evaluation_not_found"
 
     # GW-5xxx upstream / 내부
     UPSTREAM_ERROR = "upstream_error"
@@ -150,6 +151,12 @@ class RequestCancelledError(GatewayError):
     code = "GW-4007"
     error_type = ErrorType.REQUEST_CANCELLED
     http_status = 499
+
+
+class EvaluationNotFoundError(GatewayError):
+    code = "GW-4008"
+    error_type = ErrorType.EVALUATION_NOT_FOUND
+    http_status = 404
 
 
 # ── GW-5xxx upstream / 내부 ────────────────────────────────────

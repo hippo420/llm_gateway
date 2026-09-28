@@ -33,7 +33,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # PEP 561 - mypy 가 설치된 패키지를 타입 체크할 수 있게 한다.
-llm_gateway = ["py.typed"]
+llm_gateway = ["py.typed", "evaluation/prompts/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

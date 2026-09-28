@@ -1,0 +1,33 @@
+# Phase 8 offline batch configuration. Paths below are relative to this file.
+# These are synthetic fixtures, NOT actual service traffic or human validation.
+datasets:
+  - name: simple-qa
+    path: ../datasets/simple-qa.jsonl
+    provenance: synthetic
+  - name: report-analysis
+    path: ../datasets/report-analysis.jsonl
+    provenance: synthetic
+  - name: news-summary
+    path: ../datasets/news-summary.jsonl
+    provenance: synthetic
+concurrency: 1
+warmup: 0
+max_tokens: 512
+temperature: 0
+seed: 0
+similarity:
+  enabled: false                 # Requires an installed embedding model; no automatic pull.
+  endpoint: http://[::1]:11434
+  model: bge-m3
+  timeout_sec: 30
+judge:
+  deployment_id: null             # Explicit enabled deployment, with a different upstream model.
+  prompt_version: judge-v1
+  max_tokens: 1024
+criteria:
+  min_samples: 20
+  min_quality: 0.8
+  max_error_rate: 0.05
+  min_human_cases: 20
+  min_spearman: 0.5
+  max_mae: 0.2

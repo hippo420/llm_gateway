@@ -1,0 +1,67 @@
+{
+  "uid": "llm-quality",
+  "title": "LLM Gateway / Quality",
+  "tags": ["llm-gateway", "quality"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-24h", "to": "now"},
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1, "type": "text", "title": "Interpretation",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 4},
+      "options": {"mode": "markdown", "content": "Latest completed offline batch per deployment/dataset. Missing scores stay absent. Compare runs only with matching dataset hashes, generation settings and judge version (see authenticated `/admin/evaluations`). **Synthetic datasets or a judge without human validation are not recommendation evidence.** Rule compliance and embedding similarity do not establish factual accuracy. Context relevance measures retrieval. Hallucination: lower is better; other scores: higher is better. Target performance excludes scoring. Multiple gateway instances may expose the same shared batch."}
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Latest batch quality (0–1)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "llm_gateway_quality_score", "legendFormat": "{{instance}} / {{deployment_id}} / {{dataset}} / {{scorer}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Target TTFT / total P95",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "llm_gateway_quality_latency_seconds", "legendFormat": "{{instance}} / {{deployment_id}} / {{dataset}} / {{stage}}"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Target output TPS (successful samples)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "llm_gateway_quality_output_tokens_per_second", "legendFormat": "{{instance}} / {{deployment_id}} / {{dataset}}"}]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Scored samples (missing scores excluded)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "llm_gateway_quality_samples", "legendFormat": "{{instance}} / {{deployment_id}} / {{dataset}} / {{scorer}}"}]
+    },
+    {
+      "id": 6, "type": "table", "title": "Human validation (1 = validated)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 7},
+      "targets": [{"refId": "A", "expr": "llm_gateway_quality_judge_validated", "instant": true, "format": "table"}]
+    },
+    {
+      "id": 7, "type": "table", "title": "Synthetic dataset (1 = synthetic)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 7},
+      "targets": [{"refId": "A", "expr": "llm_gateway_quality_dataset_synthetic", "instant": true, "format": "table"}]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Age of latest batch",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 27, "w": 24, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "time() - llm_gateway_quality_last_run_timestamp_seconds", "legendFormat": "{{instance}} / {{deployment_id}} / {{dataset}}"}]
+    }
+  ]
+}

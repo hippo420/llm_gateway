@@ -15,10 +15,10 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 
 ## 현재 상태
 
-**Phase 7 코드 구현 완료.** 해시 기반 A/B 할당, guardrail 자동 중단, 실험별 비교 지표와 시간 분할 벤치마크를 추가했다. 실제 Ollama/vLLM 비교와 품질 검증은 남아 있다.
+**Phase 8 코드 구현 완료.** 배치 품질 평가, 규칙·임베딩·LLM judge 채점, 사람 평가 상관 검증 도구와 성능·품질 통합 보고서를 추가했다. 실제 서비스 데이터 및 실제 모델·사람 채점 검증은 남아 있다.
 
 - `pytest` — **실제 Ollama 없이 돈다** (R1~R6 진단 재현 테스트 포함)
-- `GET /metrics` 로 L1/L2·설정·라우팅·복원력·실험 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 9종)
+- `GET /metrics` 로 L1/L2·설정·라우팅·복원력·실험·품질 지표 노출, `docker compose up -d` 로 Prometheus + Grafana(대시보드 10종)
 - `GET /admin/diagnosis`로 규칙 기반 진단 조회. baseline 설정 후 `GATEWAY_DIAGNOSIS_ENABLED=true`
 - YAML 감시, Redis 임시 override/TTL/pub-sub, 검증 후 무중단 설정 교체
 - 세션 해시 기반 Weighted 분배, 선택 이유/대체 후보 보존, Redis weight/disable 즉시 반영
@@ -27,14 +27,15 @@ Spring Boot → Spring AI → [ LLM Gateway ] → Ollama / vLLM / External → G
 - SSE 전송 중 연결 종료도 감시해 upstream 정지/느린 클라이언트 상황에서 즉시 취소
 - 실험 우선 할당, warm-up/fallback 분리 집계, guardrail 위반 후 control 전환
 - `GET /admin/experiments` 실험 보고서, `scripts/benchmark.py` 고정 배포 순차 벤치마크
+- `scripts/evaluate.py` 품질 배치/사람 평가 검증, `GET /admin/evaluations` 영속 보고서 조회
 - `/admin/config`에서 유효 설정 조회. 모든 `/admin` API는 `GATEWAY_API_KEY` 설정 및 Bearer 인증 필수
 - 구현 기록 / 실측 데이터 / 설계와 갈라진 지점:
   [Phase 1](docs/phases/phase-01-implementation.md) · [Phase 2](docs/phases/phase-02-implementation.md) ·
   [Phase 3](docs/phases/phase-03-implementation.md) · [Phase 4](docs/phases/phase-04-implementation.md) ·
   [Phase 5](docs/phases/phase-05-implementation.md) · [Phase 6](docs/phases/phase-06-implementation.md) ·
-  [Phase 7](docs/phases/phase-07-implementation.md)
+  [Phase 7](docs/phases/phase-07-implementation.md) · [Phase 8](docs/phases/phase-08-implementation.md)
 
-다음 구현은 **Phase 8 품질 평가**다. 운영 서빙 선택은 성능/자원/품질 실측 후 결정한다.
+다음 구현은 **Phase 9 동적 정책**이다. 운영 서빙 선택은 성능/자원/품질 실측 후 결정한다.
 
 ---
 
@@ -166,6 +167,43 @@ Prometheus alert rule로 제공한다. 외부 알림 수신 채널은 별도 설
 retry/fallback 없이 지정 배포를 측정한다. 현재 vLLM adapter는 미구현이므로 실제 vLLM 비교에는
 adapter와 서버 준비가 필요하다. 설정 예제와 한계는 [Phase 7 기록](docs/phases/phase-07-implementation.md)을 참고한다.
 
+### 품질 평가 (Phase 8)
+
+`config/evaluation.yaml`로 별도 배치를 실행한다. 기본은 **합성 데이터 3종 × 30건과 L1 규칙 검사**다.
+L2는 준비된 bge-m3 서버의 endpoint와 `similarity.enabled: true`를 설정하고,
+L3는 `gateway.yaml`에 등록된 별도 모델의 ID를 `judge.deployment_id`에 지정하면 활성화된다.
+설정만으로 모델을 다운로드하지 않는다. 평가 대상과 judge의 upstream 모델명이 같으면 실행을 거부한다.
+
+```powershell
+.venv/Scripts/python.exe scripts/evaluate.py run --deployment qwen-7b@ollama --run-id eval-001 --save-answers
+```
+
+이 명령은 실제 모델을 호출한다. 비교 배포는 `--deployment`를 반복해 지정한다. 각 배포의
+답변 생성을 먼저 측정한 뒤 임베딩, judge 순서로 채점한다. retry/fallback/breaker와 A/B 할당은
+배치에서 비활성이다. 결과는 `operations/evaluations/eval-001/`에 저장된다.
+
+- `report.md` / `summary.json`: 성능·품질과 요청 종류별 적합도
+- `results.json`: 개별 표본, 실패 사유, 데이터셋/설정/프롬프트 해시
+- `human-review.jsonl`: 사람 평가 입력 양식. `--save-answers`를 켠 경우 로컬 답변·자료 포함
+- `policy-input.json`: Phase 9 입력. 운영 라우팅을 직접 변경하지 않는 후보 자료
+
+Judge를 켜고 실행한 결과에서 **고유 질의 최소 20건**을 사람이 채점한다. 검토할 행을 별도
+JSONL로 복사하고 `human_score`(0~1), `reviewer`를 작성한다. 미채점 행은 제외하고 해시를 보존한다.
+
+```powershell
+.venv/Scripts/python.exe scripts/evaluate.py calibrate --run-id eval-001 --ratings operations/evaluations/eval-001/human-rated.jsonl
+```
+
+Pearson/Spearman/MAE를 계산하며 기본 검증 기준은 Spearman ≥ 0.5, MAE ≤ 0.2다.
+합성 데이터 또는 사람 검증 미통과 결과에서는 권장 모델을 비워 둔다. 상관 검증은 해당 run에만 적용된다.
+`--save-answers` 없이도 점수와 답변 해시는 저장되지만, 사람 검토용 답변은 별도로 보관해야 한다.
+
+Gateway와 CLI가 같은 결과 디렉터리를 보도록 `GATEWAY_EVALUATION_RESULTS_PATH`와 `--out-dir`을 맞춘다.
+인증된 `GET /admin/evaluations` 및 `GET /admin/evaluations/{run_id}`에서 요약을 확인할 수 있다.
+Grafana `LLM Gateway / Quality`는 배치 점수·TTFT·TPS·검증 여부·데이터 출처·경과 시간을 함께 보여준다.
+미측정 점수는 0으로 채우지 않는다. 전체 절차와 한계는
+[Phase 8 기록](docs/phases/phase-08-implementation.md), 데이터 스키마는 [datasets/README.md](datasets/README.md)를 참고한다.
+
 ## 구조
 
 ```text
@@ -180,6 +218,7 @@ src/llm_gateway/
 ├── registry/                Model Registry, Config loader
 ├── routing/                 ModelRouter, Static/Weighted/HealthAware, RoutingDecision
 ├── experiment/              실험 스키마, 할당, guardrail, 보고서, 벤치마크
+├── evaluation/              배치 품질 평가, judge, 사람 상관 검증, 파일 보고서
 ├── resilience/              Retry/Fallback/Timeout/Circuit Breaker
 ├── adapters/                LLMAdapter ABC + Ollama 구현
 ├── service/                 ChatService (오케스트레이션)

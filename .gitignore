@@ -13,6 +13,7 @@ dist/
 logs/
 observability/grafana/data/
 operations/results/*.json
+operations/evaluations/
 .idea/
 .vscode/
 

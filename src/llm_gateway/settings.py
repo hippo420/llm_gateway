@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # --- observability (Phase 2) ---
     metrics_enabled: bool = True
 
+    # Completed offline evaluation summaries, read by admin API and quality metrics.
+    evaluation_results_path: Path = Path("operations/evaluations")
+
     # --- rule-based diagnosis (Phase 3) ---
     diagnosis_enabled: bool = False
     diagnosis_config_path: Path = Path("config/diagnosis.yaml")
