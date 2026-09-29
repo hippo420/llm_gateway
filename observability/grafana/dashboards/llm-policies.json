@@ -6,7 +6,7 @@
     "policy"
   ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "time": {
     "from": "now-1h",
@@ -249,6 +249,93 @@
         {
           "refId": "A",
           "expr": "sum by (deployment_id) (rate(llm_gateway_requests_total[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Automatic applications",
+      "description": "Phase 10. Admitted tier does not imply activation: global switch, evidence and budgets must also pass. Journal: authenticated /admin/automation-journal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_auto_remediation_total",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Admitted automation tier",
+      "description": "Phase 10. Admitted tier does not imply activation: global switch, evidence and budgets must also pass. Journal: authenticated /admin/automation-journal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_automation_level",
+          "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Global automation switch",
+      "description": "Phase 10. Admitted tier does not imply activation: global switch, evidence and budgets must also pass. Journal: authenticated /admin/automation-journal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "llm_gateway_auto_remediation_enabled",
           "legendFormat": "{{instance}} {{policy_id}} {{decision}} {{deployment_id}}"
         }
       ]

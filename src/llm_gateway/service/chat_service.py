@@ -99,6 +99,10 @@ class ChatService:
 
     # ── 공개 API ────────────────────────────────────────────────
 
+    @property
+    def circuit_breakers(self) -> CircuitBreakers:
+        return self._breakers
+
     def routing_status(self) -> dict[str, Any]:
         return self._health.report()
 

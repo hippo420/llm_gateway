@@ -21,12 +21,16 @@ from ..evaluation.store import EvaluationStore
 from ..registry.manager import ConfigManager, fingerprint, redact
 from ..registry.models import RegistrySnapshot
 from ..registry.overrides import DeploymentOverride, OverrideDocument, deep_merge
+from ..resilience.breaker import CircuitBreakers
+from .automation import AutomationController
+from .metrics import POLICY_LOOP_ERRORS
 from .models import (
     DisableAction,
     Policy,
     PolicyConfig,
     PolicyState,
     Recommendation,
+    ReduceWeightAction,
     TimeoutAction,
     WeightAction,
 )
@@ -58,6 +62,7 @@ class PolicyEngine:
         evaluation_path: Path,
         *,
         clock: Callable[[], datetime] | None = None,
+        breakers: CircuitBreakers | None = None,
     ) -> None:
         self.config, self.manager, self.diagnosis = config, manager, diagnosis
         self.evaluation_path = evaluation_path
@@ -78,6 +83,7 @@ class PolicyEngine:
                 if self.targets[check.deployment_id].queries:
                     raise ValueError("policy validation requires standard five-minute queries")
         self._task: asyncio.Task | None = None
+        self.automation = AutomationController(self, breakers)
 
     async def state(self) -> PolicyState:
         store = self.manager.source.override
@@ -94,18 +100,43 @@ class PolicyEngine:
             events.clear()
             state = decode(raw)
             counts = {key: len(record.events) for key, record in state.records.items()}
+            control_count = len(state.control_events)
             updated = fn(state, document, base)
+            if state.audit_sequence == 0:
+                self.automation.event(
+                    state,
+                    "journal_initialized",
+                    self.clock(),
+                    "policy-engine",
+                    "append-only journal begins; earlier Phase 9 state retained",
+                    previous_state_sha256=hashlib.sha256(
+                        raw.encode() if isinstance(raw, str) else raw or b""
+                    ).hexdigest(),
+                )
             for key, record in state.records.items():
                 for event in record.events[counts.get(key, 0) :]:
                     events.append(
-                        {"recommendation_id": key, "policy_id": record.policy.id, **event}
+                        {
+                            "recommendation_id": key,
+                            "policy_id": record.policy.id,
+                            "automation_level": record.automation_level,
+                            "before_config": record.before_config,
+                            "after_config": record.after_config,
+                            "trigger_evidence": record.model_dump(mode="json")["trigger_evidence"],
+                            "validation": record.validation_result,
+                            **event,
+                        }
                     )
+            events.extend(state.control_events[control_count:])
+            for event in events:
+                state.audit_sequence += 1
+                event["sequence"] = state.audit_sequence
             encoded = state.model_dump_json()
             if len(encoded.encode()) > 50_000_000:
                 raise ConfigError("policy audit capacity reached; archive before further changes")
             return encoded, updated
 
-        raw = await self.manager.atomic_override_with_state(STATE_KEY, transform)
+        raw = await self.manager.atomic_override_with_state(STATE_KEY, transform, lambda: events)
         for event in events:
             log_event(log, "policy_transition", transition=event.pop("event"), **event)
         return decode(raw)
@@ -159,7 +190,14 @@ class PolicyEngine:
         if changes and (now - max(changes)).total_seconds() < policy.guard.cooldown_sec:
             raise PolicyConflictError("policy cooldown has not elapsed")
 
-    def _plan(self, policy: Policy, document: OverrideDocument, base: RegistrySnapshot):
+    def _plan(
+        self,
+        policy: Policy,
+        document: OverrideDocument,
+        base: RegistrySnapshot,
+        *,
+        reduction: int | None = None,
+    ):
         snapshot = self.manager.source.merge(base, document)
         deps = deployments(snapshot)
         names = {
@@ -178,7 +216,7 @@ class PolicyEngine:
         ):
             raise PolicyConflictError("pause the model's experiment before changing its policy")
         if (
-            any(isinstance(a, WeightAction) for a in policy.actions)
+            any(isinstance(a, (WeightAction, ReduceWeightAction)) for a in policy.actions)
             and snapshot.routing.strategy == "static"
         ):
             raise PolicyConflictError("weight changes require weighted or health_aware routing")
@@ -192,8 +230,13 @@ class PolicyEngine:
                 "weight": dep.weight,
                 "timeout": dep.timeout.model_dump(),
             }
-            if isinstance(action, WeightAction):
-                weight = dep.weight + action.delta
+            if isinstance(action, (WeightAction, ReduceWeightAction)):
+                delta = (
+                    -reduction
+                    if isinstance(action, ReduceWeightAction) and reduction
+                    else action.delta
+                )
+                weight = dep.weight + delta
                 if not policy.guard.min_weight <= weight <= policy.guard.max_weight:
                     raise PolicyConflictError("weight change exceeds policy guard")
                 patch = {"weight": weight}
@@ -257,7 +300,7 @@ class PolicyEngine:
         ):
             raise PolicyConflictError("deployment differs from the quality evaluation")
 
-    async def propose(self, policy: Policy) -> Recommendation | None:
+    async def propose(self, policy: Policy, *, automatic: bool = False) -> Recommendation | None:
         now = self.clock()
         diagnosis = self._diagnosis(policy, now)
         if diagnosis is None:
@@ -266,6 +309,12 @@ class PolicyEngine:
         identifier = "rec-" + uuid4().hex
 
         def change(state, document, base):
+            reduction = None
+            level = "L1"
+            if automatic:
+                grant = self.automation.guard(state, policy, document, base, now)
+                level = grant.level
+                reduction = self.automation.reduction(policy, grant)
             self._guard(state, policy, now)
             if len(state.records) >= 10000:
                 raise ConfigError("policy audit capacity reached")
@@ -283,7 +332,9 @@ class PolicyEngine:
                 >= self.config.max_pending
             ):
                 raise PolicyConflictError("pending recommendation limit reached")
-            snapshot, before, after, patches = self._plan(policy, document, base)
+            snapshot, before, after, patches = self._plan(
+                policy, document, base, reduction=reduction
+            )
             self._check_quality(snapshot, quality)
             record = Recommendation(
                 id=identifier,
@@ -300,6 +351,7 @@ class PolicyEngine:
                 before_overrides={key: document.deployments.get(key) for key in patches},
                 before_expirations={key: document.expires_at.get(key) for key in patches},
                 after_overrides=patches,
+                automation_level=level,
             )
             record.event("proposed", now, "policy-engine", policy.expected_effect)
             state.records[identifier] = record
@@ -324,6 +376,16 @@ class PolicyEngine:
         return record
 
     async def approve(self, identifier: str, actor: str, reason: str) -> Recommendation:
+        return await self._apply(identifier, actor, reason, automatic=False)
+
+    async def _apply(
+        self,
+        identifier: str,
+        actor: str,
+        reason: str,
+        *,
+        automatic: bool,
+    ) -> Recommendation:
         initial = self._get(await self.state(), identifier)
         now = self.clock()
         quality = await self._quality(initial.policy, now)
@@ -335,10 +397,22 @@ class PolicyEngine:
                 raise PolicyConflictError("proposal is not pending or has expired")
             if policy is None or record.policy_config_hash != self.config_hash:
                 raise PolicyConflictError("policy configuration changed; request a new proposal")
+            reduction = None
+            if automatic:
+                grant = self.automation.guard(state, policy, document, base, now)
+                if record.automation_level != grant.level:
+                    raise PolicyConflictError("automation level changed since proposal")
+                reduction = self.automation.reduction(policy, grant)
+            elif record.automation_level in ("L2", "L3"):
+                raise PolicyConflictError(
+                    "automatic proposal cannot be approved as a human decision"
+                )
             if self._diagnosis(policy, now) is None:
                 raise PolicyConflictError("diagnosis is no longer active or is stale")
             self._guard(state, policy, now)
-            snapshot, _, _, patches = self._plan(policy, document, base)
+            snapshot, _, after, patches = self._plan(policy, document, base, reduction=reduction)
+            if after != record.after_config:
+                raise PolicyConflictError("planned step changed since proposal")
             if fingerprint(base) != record.base_hash or fingerprint(snapshot) != record.config_hash:
                 raise PolicyConflictError(
                     "configuration changed since proposal; request a new proposal"
@@ -363,8 +437,13 @@ class PolicyEngine:
                 expirations[name] = expiry
             record.applied_expirations = {key: expirations[key] for key in patches}
             record.status = "observing"
-            record.approved_by, record.approved_at, record.applied_at = actor, now, now
-            record.event("approved", now, actor, reason)
+            record.applied_at = now
+            if automatic:
+                self.automation.applied(state, record)
+                record.event("auto_applied", now, actor, reason)
+            else:
+                record.approved_by, record.approved_at = actor, now
+                record.event("approved", now, actor, reason)
             record.event("applied", now, actor, reason)
             return OverrideDocument(
                 updated_at=now,
@@ -545,12 +624,15 @@ class PolicyEngine:
                         "policy-engine",
                         "validation failed or unavailable",
                     )
+            self.automation.reconcile(state, now)
             return document
 
         await self._transaction(maintain)
-        for policy in self.policies.values():
+        for policy in sorted(self.policies.values(), key=lambda p: (-p.automation.priority, p.id)):
+            if policy.automation.level == "L0":
+                continue
             try:
-                await self.propose(policy)
+                await self.automation.process(policy)
             except PolicyConflictError:
                 continue  # expected guards; visible through pending/history and unchanged config
 
@@ -564,6 +646,7 @@ class PolicyEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                POLICY_LOOP_ERRORS.inc()
                 log_event(
                     log, "policy_loop_failed", level=logging.ERROR, error_type=type(exc).__name__
                 )

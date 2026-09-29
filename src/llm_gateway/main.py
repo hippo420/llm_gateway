@@ -103,6 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 config_manager,
                 app.state.diagnosis_engine,
                 settings.evaluation_results_path,
+                breakers=app.state.chat_service.circuit_breakers,
             )
             await policy_engine.state()  # unavailable/corrupt audit store must fail startup
             app.state.policy_engine = policy_engine

@@ -340,7 +340,14 @@ async def metrics_endpoint(request: Request) -> Response:
         from ..policy.metrics import policy_metrics
 
         try:
-            extra += policy_metrics(await policy_engine.state(), set(policy_engine.policies))
+            extra += policy_metrics(
+                await policy_engine.state(),
+                set(policy_engine.policies),
+                auto_configured=policy_engine.config.auto_remediation.enabled,
+                policy_levels={
+                    key: p.automation.level for key, p in policy_engine.policies.items()
+                },
+            )
             store_up = 1
         except ConfigError:
             store_up = 0  # Keep other metrics available, but expose the audit-store failure.

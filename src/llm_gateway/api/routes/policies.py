@@ -3,6 +3,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...core.errors import ConfigError
 from ...policy.engine import PolicyEngine
+from ...policy.models import Admission
 from ..dependencies import verify_admin_key
 from .config import actor
 
@@ -91,3 +92,61 @@ async def resolve(
     controller: PolicyEngine = Depends(engine),
 ) -> dict:
     return controller.public(await controller.resolve(identifier, actor(request), body.reason))
+
+
+class SwitchRequest(DecisionRequest):
+    enabled: bool = Field(strict=True)
+
+
+class AdmissionRequest(DecisionRequest):
+    evidence: Admission
+
+
+@router.get("/automation")
+async def automation_status(controller: PolicyEngine = Depends(engine)) -> dict:
+    state = await controller.state()
+    return {
+        "configured": controller.config.auto_remediation.enabled,
+        "enabled": controller.config.auto_remediation.enabled and state.automation_enabled,
+        "grants": {name: grant.model_dump(mode="json") for name, grant in state.grants.items()},
+    }
+
+
+@router.put("/automation")
+async def automation_switch(
+    body: SwitchRequest,
+    request: Request,
+    controller: PolicyEngine = Depends(engine),
+) -> dict:
+    state = await controller.automation.set_enabled(body.enabled, actor(request), body.reason)
+    return {"enabled": controller.config.auto_remediation.enabled and state.automation_enabled}
+
+
+@router.post("/automation/{policy_id}/admit")
+async def automation_admit(
+    policy_id: str,
+    body: AdmissionRequest,
+    request: Request,
+    controller: PolicyEngine = Depends(engine),
+) -> dict:
+    state = await controller.automation.admit(policy_id, body.evidence, actor(request), body.reason)
+    return state.grants[policy_id].model_dump(mode="json")
+
+
+@router.post("/automation/{policy_id}/demote")
+async def automation_demote(
+    policy_id: str,
+    body: DecisionRequest,
+    request: Request,
+    controller: PolicyEngine = Depends(engine),
+) -> dict:
+    state = await controller.automation.demote(policy_id, actor(request), body.reason)
+    return state.grants[policy_id].model_dump(mode="json")
+
+
+@router.get("/automation-journal")
+async def automation_journal(
+    limit: int = Query(100, ge=1, le=1000),
+    controller: PolicyEngine = Depends(engine),
+) -> dict:
+    return {"events": await controller.automation.journal(limit)}

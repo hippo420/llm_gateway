@@ -4,6 +4,15 @@ interval_sec: 15
 max_active: 1
 max_changes_per_hour: 4
 max_pending: 20
+auto_remediation:
+  enabled: false
+  max_changes_per_hour: 2
+  max_changes_per_day: 6
+  max_weight_step: 10
+  min_human_decisions: 30
+  min_agreement: 0.95
+  demote_after_rollbacks: 2
+  promote_after_successes: 10
 policies: []
 
 # Example only: both deployments must be enabled under the SAME logical model,
@@ -33,3 +42,15 @@ policies: []
 #     expected_effect: Reduce errors by shifting traffic to the healthy deployment.
 #     recommendation_ttl_sec: 900
 #     override_ttl_sec: 3600
+
+# Phase 10 opt-in policy extension (default L1; never automatically admitted):
+# automation:
+#   level: L2
+#   priority: 10
+#   max_steps: 3
+#   require_breaker_open: true
+# Automatic actions must affect ONE deployment: disable_deployment or reduce_weight.
+# Example gradual relative-weight reduction, at most 10 per validated step:
+# actions: [{type: reduce_weight, target: model@primary, delta: -30}]
+# Requires 30 validated human approvals of that exact policy/base config, operational
+# evidence admission, and authenticated PUT /admin/automation with enabled=true.

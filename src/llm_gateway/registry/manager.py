@@ -268,6 +268,7 @@ class ConfigManager:
         transform: Callable[
             [str | bytes | None, OverrideDocument, RegistrySnapshot], tuple[str, OverrideDocument]
         ],
+        audit_events: Callable[[], list[dict]] | None = None,
     ) -> str:
         """Policy extension of Phase 4: validate first, commit state + patches together."""
         store = self.source.override
@@ -288,7 +289,7 @@ class ConfigManager:
                 return state, document
 
             try:
-                state, document = await store.update_with_state(state_key, update)
+                state, document = await store.update_with_state(state_key, update, audit_events)
             except RedisError as exc:
                 raise ConfigError(
                     "policy transaction unavailable; inspect history before retry"

@@ -35,6 +35,14 @@ class DisableAction(StrictModel):
     target: str = Field(min_length=1)
 
 
+class ReduceWeightAction(StrictModel):
+    """Reduce one relative routing weight; the router renormalizes other candidates."""
+
+    type: Literal["reduce_weight"]
+    target: str = Field(min_length=1)
+    delta: int = Field(ge=-100, le=-1, strict=True)
+
+
 class TimeoutAction(StrictModel):
     type: Literal["set_timeout"]
     target: str = Field(min_length=1)
@@ -47,7 +55,30 @@ class TimeoutAction(StrictModel):
         return self
 
 
-Action = Annotated[WeightAction | DisableAction | TimeoutAction, Field(discriminator="type")]
+Action = Annotated[
+    WeightAction | ReduceWeightAction | DisableAction | TimeoutAction, Field(discriminator="type")
+]
+
+Level = Literal["L0", "L1", "L2", "L3"]
+
+
+class Automation(StrictModel):
+    # Ceiling, not permission: admission evidence and runtime switch are also required.
+    level: Level = "L1"
+    priority: int = Field(default=0, ge=0, le=100, strict=True)
+    max_steps: int = Field(default=3, ge=1, le=10, strict=True)
+    require_breaker_open: bool = False
+
+
+class AutoRemediation(StrictModel):
+    enabled: bool = False
+    max_changes_per_hour: int = Field(default=2, ge=1, le=20, strict=True)
+    max_changes_per_day: int = Field(default=6, ge=1, le=50, strict=True)
+    max_weight_step: int = Field(default=10, ge=1, le=10, strict=True)
+    min_human_decisions: int = Field(default=30, ge=30, strict=True)
+    min_agreement: float = Field(default=0.95, ge=0.9, le=1)
+    demote_after_rollbacks: int = Field(default=2, ge=1, le=3, strict=True)
+    promote_after_successes: int = Field(default=10, ge=10, strict=True)
 
 
 class Guard(StrictModel):
@@ -101,6 +132,7 @@ class Policy(StrictModel):
     recommendation_ttl_sec: int = Field(default=900, ge=60, le=86400, strict=True)
     override_ttl_sec: int = Field(default=3600, ge=600, le=86400, strict=True)
     quality: QualityGate | None = None
+    automation: Automation = Field(default_factory=Automation)
 
     @model_validator(mode="after")
     def reversible(self) -> Self:
@@ -122,6 +154,7 @@ class PolicyConfig(StrictModel):
     max_changes_per_hour: int = Field(default=4, ge=1, le=50, strict=True)
     max_pending: int = Field(default=20, ge=1, le=100, strict=True)
     policies: list[Policy] = Field(default_factory=list, max_length=100)
+    auto_remediation: AutoRemediation = Field(default_factory=AutoRemediation)
 
     @model_validator(mode="after")
     def unique(self) -> Self:
@@ -176,12 +209,39 @@ class Recommendation(StrictModel):
     rolled_back: bool = False
     rolled_back_at: AwareDatetime | None = None
     events: list[dict] = Field(default_factory=list)
+    automation_level: Level = "L1"
 
     def event(self, name: str, at: datetime, actor: str, reason: str) -> None:
         self.events.append({"event": name, "at": at.isoformat(), "actor": actor, "reason": reason})
+
+
+class Admission(StrictModel):
+    metrics_stable_since: AwareDatetime
+    false_positive_rate: float = Field(ge=0, le=1)
+    rollback_verified_at: AwareDatetime
+    evidence_reference: str = Field(min_length=1, max_length=1000)
+
+
+class AutomationGrant(StrictModel):
+    level: Level = "L1"
+    policy_hash: str
+    config_hash: str
+    base_hash: str
+    diagnosis_hash: str
+    initial_override_hash: str
+    granted_at: AwareDatetime
+    evidence: Admission
+    steps: int = 0
+    reduced_weight: int = 0
+    exhausted: bool = False
+    last_record_id: str | None = None
 
 
 class PolicyState(StrictModel):
     schema_version: Literal[1] = 1
     # No TTL or automatic deletion. Archive explicitly before this bound is reached.
     records: dict[str, Recommendation] = Field(default_factory=dict, max_length=10000)
+    automation_enabled: bool = False
+    grants: dict[str, AutomationGrant] = Field(default_factory=dict, max_length=100)
+    control_events: list[dict] = Field(default_factory=list, max_length=10000)
+    audit_sequence: int = Field(default=0, ge=0)

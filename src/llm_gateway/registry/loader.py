@@ -10,6 +10,7 @@ Phase 4: RedisConfigSource + LayeredConfigSource(우선순위 병합) 추가.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from abc import ABC, abstractmethod
@@ -189,17 +190,45 @@ class RedisConfigSource(ConfigSource[OverrideDocument]):
         self,
         state_key: str,
         transform: Callable[[str | bytes | None, OverrideDocument], tuple[str, OverrideDocument]],
+        audit_events: Callable[[], list[dict]] | None = None,
     ) -> tuple[str, OverrideDocument]:
         """Commit a control-plane state transition and all override changes atomically."""
         for _ in range(5):
             async with self.client.pipeline(transaction=True) as pipe:
                 try:
-                    await pipe.watch(self.KEY, state_key)
+                    await pipe.watch(self.KEY, state_key, state_key + ":audit")
+                    if audit_events is not None:
+                        kind = await pipe.type(state_key + ":audit")
+                        if kind not in ("none", "stream", b"none", b"stream"):
+                            raise ConfigError("audit journal has an invalid Redis type")
                     raw_state = await pipe.get(state_key)
                     current = self.decode(await pipe.get(self.KEY)).active()
                     state, updated = transform(raw_state, current)
+                    entries = audit_events() if audit_events is not None else []
+                    if audit_events is not None:
+                        previous_sequence = json.loads(state)["audit_sequence"] - len(entries)
+                        last = await pipe.xrevrange(state_key + ":audit", count=1)
+                        last_id = last[0][0] if last else None
+                        if isinstance(last_id, bytes):
+                            last_id = last_id.decode()
+                        expected_id = f"{previous_sequence}-0" if previous_sequence else None
+                        if (
+                            last_id != expected_id
+                            or await pipe.xlen(state_key + ":audit") != previous_sequence
+                        ):
+                            raise ConfigError(
+                                "audit journal was lost or truncated; restore before changes"
+                            )
                     pipe.multi()
                     pipe.set(state_key, state)  # audit state has no expiration
+                    if audit_events is not None:
+                        for event in entries:
+                            # Append-only application journal; never trim/expire/delete entries.
+                            pipe.xadd(
+                                state_key + ":audit",
+                                {"event": json.dumps(event)},
+                                id=f"{event['sequence']}-0",
+                            )
                     if updated != current:
                         if updated.deployments:
                             expiry = math.ceil(
