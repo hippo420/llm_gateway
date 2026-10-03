@@ -1,0 +1,20 @@
+# gateway.mac은 Compose extra_hosts에서 맥의 LAN IP로 연결한다.
+# Gateway 포트를 변경했다면 아래 8080도 변경한다.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/experiment-alerts.yml
+  - /etc/prometheus/policy-alerts.yml
+
+scrape_configs:
+  - job_name: llm-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway.mac:8080"]
+        labels:
+          service: llm-gateway
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,38 @@
+# 다른 PC에서 실행: docker compose --env-file .env.monitoring -f docker-compose.monitoring.yml up -d
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    extra_hosts:
+      - "gateway.mac:${GATEWAY_MAC_IP:?Set GATEWAY_MAC_IP in .env.monitoring}"
+    volumes:
+      - ./observability/prometheus.remote.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/experiment-alerts.yml:/etc/prometheus/experiment-alerts.yml:ro
+      - ./observability/policy-alerts.yml:/etc/prometheus/policy-alerts.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env.monitoring}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
