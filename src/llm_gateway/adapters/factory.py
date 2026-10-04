@@ -15,13 +15,14 @@ from ..core.errors import AdapterNotRegisteredError
 from ..registry.models import ModelDeployment, RegistrySnapshot
 from .base import LLMAdapter
 from .ollama import OllamaAdapter
+from .openai_compatible import OpenAICompatibleAdapter
 
 # adapter 이름 -> 클래스.
 # 새 adapter 를 추가하면 여기에 등록하고 docs/specs/adapter-interface.md 에 매핑 표를 쓴다.
 ADAPTER_REGISTRY: dict[str, type[LLMAdapter]] = {
     OllamaAdapter.name: OllamaAdapter,
     # Phase 5: VllmAdapter.name: VllmAdapter,
-    # 이후:    OpenAIAdapter.name: OpenAIAdapter,
+    OpenAICompatibleAdapter.name: OpenAICompatibleAdapter,
 }
 
 

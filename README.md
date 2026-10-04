@@ -59,26 +59,29 @@ Phase 10: [구현·활성화 조건·한계](operations/results/2026-09-29-phase
 
 ## Docker 서비스 (포트 35000)
 
-Gateway는 컨테이너에서, Ollama는 Docker 호스트의 11434 포트에서 실행한다.
+Gateway는 컨테이너에서, LM Studio는 Docker 호스트의 1234 포트에서 실행한다.
+OpenAI 호환 어댑터(`openai`)로 `http://host.docker.internal:1234/v1`에 연결한다.
 Docker 전용 모델 설정은 `config/gateway.docker.yaml`이며 기존 개발 설정과 별도다.
 
-| 요청의 model | 용도 | Ollama 모델 |
+| 요청의 model | 용도 | LM Studio 모델 ID (예시) |
 | --- | --- | --- |
-| `summary` | 단순 요약 | `qwen3:4b` |
-| `analysis` | 분석 | `qwen3.5:9b` |
+| `summary` | 단순 요약 | `qwen3-4b` |
+| `analysis` | 분석 | `qwen3.5-9b` |
 
-호스트에서 `ollama list`로 모델 태그를 확인한다. 모델이 없다면 호스트에서 준비한다.
+LM Studio의 Developer → Local Server에서 서버를 시작하고 두 모델을 로드한다.
+Docker에서 접근할 수 있도록 **Serve on Local Network**를 활성화한다.
+서버 포트가 1234가 아니면 `config/gateway.docker.yaml`의 두 endpoint를 실제 포트로 변경한다.
 
 ```bash
-ollama pull qwen3:4b
-ollama pull qwen3.5:9b
+curl http://localhost:1234/v1/models
 ```
 
-Ollama가 컨테이너에서 접근 가능한 주소에 바인딩되어 있어야 한다.
-`OLLAMA_HOST=0.0.0.0:11434`를 Ollama 실행 환경에 설정하고 재시작한다.
-Linux 서비스는 systemd 서비스 환경에, Windows/macOS 앱은 앱 실행 환경에 설정한다.
-Ollama 접근 허용 범위는 Docker 네트워크로 제한한다.
-컨테이너는 `host.docker.internal:11434`로 연결하며 Linux 호스트 매핑도 Compose에 포함되어 있다.
+반환된 `data[].id`를 설정의 각 `upstream_model`에 그대로 넣는다.
+위 표의 ID는 예시이며 다운로드한 모델의 식별자에 맞춰야 한다.
+endpoint에는 `/v1`을 한 번만 넣는다. 어댑터가 `chat/completions`와 `models`를 덧붙인다.
+LM Studio 인증을 사용하면 배포의 `api_key_env: LM_STUDIO_API_KEY`를 지정하고
+Compose의 Gateway environment에 `LM_STUDIO_API_KEY: "${LM_STUDIO_API_KEY}"`를 추가한다.
+Gateway 자체의 `GATEWAY_API_KEY`와 upstream 서버의 키는 별도다.
 
 ```bash
 docker compose up -d --build gateway
@@ -92,7 +95,8 @@ curl http://localhost:35000/v1/chat/completions \
 
 분석 요청은 `model`을 `analysis`로 지정한다. 내용에 따라 자동으로 모델을 분류하지 않는다.
 `GATEWAY_API_KEY`를 `.env`에 설정하면 요청에 `Authorization: Bearer <키>` 헤더를 추가한다.
-관리 API는 키 설정이 필수다. `readyz`는 연결 상태를 확인하며 모델 설치 여부는 `ollama list`로 확인한다.
+관리 API는 키 설정이 필수다. `readyz`는 서버 연결과 설정한 모델 ID가 `/v1/models`에 있는지 확인한다.
+실제 모델 로딩 및 추론 성공 여부는 채팅 요청으로 확인한다.
 
 ```bash
 docker compose up -d --build           # Gateway + 관측 스택

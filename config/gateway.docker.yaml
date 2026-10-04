@@ -1,3 +1,4 @@
+# LM Studio /v1/models의 id와 upstream_model을 일치시킬 것.
 version: 1
 defaults:
   timeout:
@@ -8,16 +9,16 @@ models:
   summary:
     description: "단순 요약 — Qwen3 4B"
     deployments:
-      - id: qwen3-4b@ollama
-        adapter: ollama
-        endpoint: http://host.docker.internal:11434
-        upstream_model: qwen3:4b
+      - id: qwen3-4b@lm-studio
+        adapter: openai
+        endpoint: http://host.docker.internal:1234/v1
+        upstream_model: qwen3-4b
   analysis:
     description: "분석 — Qwen3.5 9B"
     deployments:
-      - id: qwen3.5-9b@ollama
-        adapter: ollama
-        endpoint: http://host.docker.internal:11434
-        upstream_model: qwen3.5:9b
+      - id: qwen3.5-9b@lm-studio
+        adapter: openai
+        endpoint: http://host.docker.internal:1234/v1
+        upstream_model: qwen3.5-9b
 routing:
   strategy: static
