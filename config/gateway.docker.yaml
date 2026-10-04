@@ -1,0 +1,23 @@
+version: 1
+defaults:
+  timeout:
+    connect: 5
+    read: 120
+    total: 300
+models:
+  summary:
+    description: "단순 요약 — Qwen3 4B"
+    deployments:
+      - id: qwen3-4b@ollama
+        adapter: ollama
+        endpoint: http://host.docker.internal:11434
+        upstream_model: qwen3:4b
+  analysis:
+    description: "분석 — Qwen3.5 9B"
+    deployments:
+      - id: qwen3.5-9b@ollama
+        adapter: ollama
+        endpoint: http://host.docker.internal:11434
+        upstream_model: qwen3.5:9b
+routing:
+  strategy: static

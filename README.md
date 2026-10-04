@@ -57,6 +57,56 @@ Phase 10: [구현·활성화 조건·한계](operations/results/2026-09-29-phase
 
 ---
 
+## Docker 서비스 (포트 35000)
+
+Gateway는 컨테이너에서, Ollama는 Docker 호스트의 11434 포트에서 실행한다.
+Docker 전용 모델 설정은 `config/gateway.docker.yaml`이며 기존 개발 설정과 별도다.
+
+| 요청의 model | 용도 | Ollama 모델 |
+| --- | --- | --- |
+| `summary` | 단순 요약 | `qwen3:4b` |
+| `analysis` | 분석 | `qwen3.5:9b` |
+
+호스트에서 `ollama list`로 모델 태그를 확인한다. 모델이 없다면 호스트에서 준비한다.
+
+```bash
+ollama pull qwen3:4b
+ollama pull qwen3.5:9b
+```
+
+Ollama가 컨테이너에서 접근 가능한 주소에 바인딩되어 있어야 한다.
+`OLLAMA_HOST=0.0.0.0:11434`를 Ollama 실행 환경에 설정하고 재시작한다.
+Linux 서비스는 systemd 서비스 환경에, Windows/macOS 앱은 앱 실행 환경에 설정한다.
+Ollama 접근 허용 범위는 Docker 네트워크로 제한한다.
+컨테이너는 `host.docker.internal:11434`로 연결하며 Linux 호스트 매핑도 Compose에 포함되어 있다.
+
+```bash
+docker compose up -d --build gateway
+curl http://localhost:35000/healthz
+curl http://localhost:35000/readyz
+curl http://localhost:35000/v1/models
+curl http://localhost:35000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"summary","messages":[{"role":"user","content":"다음 문장을 요약해줘: LLM Gateway는 요청을 받아 호스트의 Ollama로 전달한다."}],"stream":false}'
+```
+
+분석 요청은 `model`을 `analysis`로 지정한다. 내용에 따라 자동으로 모델을 분류하지 않는다.
+`GATEWAY_API_KEY`를 `.env`에 설정하면 요청에 `Authorization: Bearer <키>` 헤더를 추가한다.
+관리 API는 키 설정이 필수다. `readyz`는 연결 상태를 확인하며 모델 설치 여부는 `ollama list`로 확인한다.
+
+```bash
+docker compose up -d --build           # Gateway + 관측 스택
+docker compose logs -f gateway
+docker compose stop gateway
+```
+
+Redis 사용 시 `docker compose --profile config up -d redis` 후
+`.env`에 `GATEWAY_REDIS_URL=redis://redis:6379/0`을 설정하고 Gateway를 재생성한다.
+Spring AI의 `base-url`은 `http://<Docker 호스트>:35000`, 논리 모델은 `summary` 또는 `analysis`다.
+평가 결과는 `gateway-evaluations` 볼륨에 유지된다.
+
+---
+
 ## 개발 환경
 
 ```bash
@@ -81,9 +131,9 @@ python -m llm_gateway.main
 ### 관측 스택 (Phase 2)
 
 ```bash
-docker compose up -d                  # Prometheus :9090 / Grafana :3000 (admin/admin)
+docker compose up -d                  # Gateway :35000 / Prometheus :9090 / Grafana :3000 (admin/admin)
 docker compose --profile gpu up -d    # + GPU exporter
-curl localhost:8080/metrics
+curl localhost:35000/metrics
 ```
 
 포트 충돌 / Windows 포트 예약 / WSL GPU 주의사항: [observability-stack.md](docs/operations/observability-stack.md)
@@ -226,7 +276,7 @@ src/llm_gateway/
 ├── service/                 ChatService (오케스트레이션)
 └── observability/           Prometheus metrics (Phase 2)
 observability/               prometheus.yml, Grafana provisioning + 대시보드 JSON
-docker-compose.yml           관측 스택
+docker-compose.yml           Gateway + 관측 스택
 ```
 
 요청 흐름:

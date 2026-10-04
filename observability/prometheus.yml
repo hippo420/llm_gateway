@@ -9,10 +9,10 @@ rule_files:
   - /etc/prometheus/policy-alerts.yml
 
 scrape_configs:
-  # GATEWAY_PORT 를 바꿨다면 여기도 맞출 것.
+  # Compose 네트워크에서 Gateway 컨테이너를 직접 조회한다.
   - job_name: llm-gateway
     static_configs:
-      - targets: ["host.docker.internal:8080"]
+      - targets: ["gateway:35000"]
         labels: { service: llm-gateway }
 
   # Ollama 는 Prometheus /metrics 를 노출하지 않는다 (404). 서빙 부하는
