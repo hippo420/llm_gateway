@@ -1,4 +1,4 @@
-# LM Studio /v1/models의 id와 upstream_model을 일치시킬 것.
+# http://192.168.0.4:11434/v1/models의 id와 upstream_model을 일치시킬 것.
 version: 1
 defaults:
   timeout:
@@ -11,14 +11,21 @@ models:
     deployments:
       - id: qwen3-4b@lm-studio
         adapter: openai
-        endpoint: http://host.docker.internal:1234/v1
+        endpoint: http://host.docker.internal:11434/v1
         upstream_model: qwen3-4b
   analysis:
     description: "분석 — Qwen3.5 9B"
     deployments:
       - id: qwen3.5-9b@lm-studio
         adapter: openai
-        endpoint: http://host.docker.internal:1234/v1
+        endpoint: http://host.docker.internal:11434/v1
         upstream_model: qwen3.5-9b
+  embeddings:
+    description: "텍스트 임베딩 — bge-m3 (1024차원). mony_batch pgvector 가 VECTOR(1024) 라 다른 모델로 바꾸면 안 된다"
+    deployments:
+      - id: bge-m3@lm-studio
+        adapter: openai
+        endpoint: http://host.docker.internal:11434/v1
+        upstream_model: text-embedding-bge-m3-ko
 routing:
   strategy: static
