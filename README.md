@@ -109,6 +109,8 @@ Redis 사용 시 `docker compose --profile config up -d redis` 후
 Spring AI의 `base-url`은 `http://<Docker 호스트>:35000`, 논리 모델은 `summary` 또는 `analysis`다.
 평가 결과는 `gateway-evaluations` 볼륨에 유지된다.
 
+코드 변경 후 재빌드·검증·롤백 절차: [코드 변경 배포 가이드](operations/deploy-code-changes.md)
+
 ---
 
 ## 개발 환경
