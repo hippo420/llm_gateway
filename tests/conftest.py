@@ -16,6 +16,8 @@ from llm_gateway.adapters.base import (
     AdapterChatChunk,
     AdapterChatRequest,
     AdapterChatResponse,
+    AdapterEmbeddingRequest,
+    AdapterEmbeddingResponse,
     AdapterTimings,
     AdapterUsage,
     LLMAdapter,
@@ -62,6 +64,15 @@ class FakeAdapter(LLMAdapter):
         self._error = error
         self._first_token_delay = first_token_delay
         self.calls: list[AdapterChatRequest] = []
+        self.embedding_calls: list[AdapterEmbeddingRequest] = []
+
+    async def embed(self, request: AdapterEmbeddingRequest) -> AdapterEmbeddingResponse:
+        self.embedding_calls.append(request)
+        return AdapterEmbeddingResponse(
+            embeddings=[[0.1, 0.2] for _ in request.input],
+            prompt_tokens=4,
+            total_tokens=4,
+        )
 
     async def chat(self, request: AdapterChatRequest) -> AdapterChatResponse:
         self.calls.append(request)

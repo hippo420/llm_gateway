@@ -295,6 +295,25 @@ class ChatService:
         ctx: RequestContext,
         headers: Mapping[str, str] | None = None,
     ) -> ModelDeployment:
+        estimated_input_tokens = (sum(len(m.content) for m in request.messages) + 3) // 4
+        return self.select_deployment(
+            request.model,
+            ctx,
+            headers,
+            estimated_input_tokens=estimated_input_tokens,
+            max_tokens=request.max_tokens,
+        )
+
+    def select_deployment(
+        self,
+        model: str,
+        ctx: RequestContext,
+        headers: Mapping[str, str] | None = None,
+        *,
+        estimated_input_tokens: int | None = None,
+        max_tokens: int | None = None,
+    ) -> ModelDeployment:
+        """Select a registered deployment for a non-chat operation."""
         snapshot = self._registry.snapshot
         header_name = snapshot.routing.bucket_header.lower()
         if headers is not None:
@@ -310,15 +329,15 @@ class ChatService:
             user_bucket = sanitize_header_value(ctx.user_bucket)
         bucket_key = primary or user_bucket or ctx.request_id
         source = "primary_header" if primary else "user_bucket" if user_bucket else "request_id"
-        ctx.assignment = self._experiments.assign(request.model, ctx, snapshot)
+        ctx.assignment = self._experiments.assign(model, ctx, snapshot)
         decision = self._router.route(
             RoutingContext(
-                model=request.model,
+            model=model,
                 bucket_key=bucket_key,
                 bucket_source=source,
                 request_type=ctx.request_type,
-                estimated_input_tokens=(sum(len(m.content) for m in request.messages) + 3) // 4,
-                max_tokens=request.max_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            max_tokens=max_tokens,
             ),
             snapshot=snapshot,
             assignment=ctx.assignment,
@@ -326,7 +345,7 @@ class ChatService:
         deployment = decision.deployment
         ctx.routing_decision = decision
         ctx.resilience_config = snapshot.resilience
-        ctx.model = request.model
+        ctx.model = model
         ctx.deployment_id = deployment.id
         if ctx.assignment and ctx.assignment.deployment_id != deployment.id:
             ctx.fallback_from = ctx.assignment.deployment_id

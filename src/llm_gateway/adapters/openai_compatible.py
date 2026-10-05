@@ -28,9 +28,12 @@ from .base import (
     AdapterChatChunk,
     AdapterChatRequest,
     AdapterChatResponse,
+    AdapterEmbeddingRequest,
+    AdapterEmbeddingResponse,
     AdapterTimings,
     AdapterUsage,
     LLMAdapter,
+    parse_embedding_vectors,
 )
 
 
@@ -63,6 +66,47 @@ class OpenAICompatibleAdapter(LLMAdapter):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    async def embed(self, request: AdapterEmbeddingRequest) -> AdapterEmbeddingResponse:
+        client = await self._ensure_client()
+        payload: dict[str, Any] = {"model": request.model, "input": request.input}
+        if request.dimensions is not None:
+            payload["dimensions"] = request.dimensions
+        try:
+            async with asyncio.timeout(self.deployment.timeout.total):
+                response = await client.post("embeddings", json=payload)
+                self._raise_for_status(response)
+                data = self._decode(response.text)
+        except (TimeoutError, httpx.HTTPError) as exc:
+            raise self._translate_exception(exc) from exc
+
+        items = data.get("data")
+        if not isinstance(items, list) or len(items) != len(request.input):
+            raise UpstreamProtocolError("upstream embeddings data must match input count")
+        ordered: list[Any] = [None] * len(items)
+        for position, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise UpstreamProtocolError("upstream embedding item must be an object")
+            index = item.get("index", position)
+            if type(index) is not int or not 0 <= index < len(items) or ordered[index] is not None:
+                raise UpstreamProtocolError("upstream embedding index is invalid")
+            ordered[index] = item.get("embedding")
+
+        usage = data.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise UpstreamProtocolError("upstream embedding usage must be an object")
+        prompt_tokens = usage.get("prompt_tokens") if usage else None
+        total_tokens = usage.get("total_tokens") if usage else None
+        if any(
+            token is not None and (type(token) is not int or token < 0)
+            for token in (prompt_tokens, total_tokens)
+        ):
+            raise UpstreamProtocolError("upstream embedding usage is invalid")
+        return AdapterEmbeddingResponse(
+            embeddings=parse_embedding_vectors(ordered, dimensions=request.dimensions),
+            prompt_tokens=prompt_tokens,
+            total_tokens=total_tokens,
+        )
 
     @staticmethod
     def _build_payload(request: AdapterChatRequest, *, stream: bool) -> dict[str, Any]:

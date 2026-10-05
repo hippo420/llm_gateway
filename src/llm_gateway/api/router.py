@@ -12,6 +12,7 @@ from .routes import (
     chat,
     config,
     diagnosis,
+    embeddings,
     evaluations,
     experiments,
     health,
@@ -23,6 +24,7 @@ from .routes import (
 # OpenAI 호환 API
 v1_router = APIRouter(prefix="/v1")
 v1_router.include_router(chat.router)
+v1_router.include_router(embeddings.router)
 v1_router.include_router(models.router)
 
 # 운영 엔드포인트 (health는 공개, diagnosis는 자체 Bearer dependency 적용)

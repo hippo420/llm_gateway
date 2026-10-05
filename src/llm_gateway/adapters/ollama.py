@@ -38,12 +38,16 @@ from .base import (
     AdapterChatChunk,
     AdapterChatRequest,
     AdapterChatResponse,
+    AdapterEmbeddingRequest,
+    AdapterEmbeddingResponse,
     AdapterTimings,
     AdapterUsage,
     LLMAdapter,
+    parse_embedding_vectors,
 )
 
 CHAT_PATH = "/api/chat"
+EMBEDDINGS_PATH = "/api/embed"
 TAGS_PATH = "/api/tags"
 
 # health() 는 readyz 안에서 여러 개가 동시에 돌기 때문에 짧게 끊는다.
@@ -89,6 +93,36 @@ class OllamaAdapter(LLMAdapter):
             ) from exc
 
         return self._parse_final(data)
+
+    async def embed(self, request: AdapterEmbeddingRequest) -> AdapterEmbeddingResponse:
+        client = await self._ensure_client()
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "input": request.input,
+            "truncate": False,
+        }
+        if request.dimensions is not None:
+            payload["dimensions"] = request.dimensions
+        try:
+            async with asyncio.timeout(self.deployment.timeout.total):
+                response = await client.post(EMBEDDINGS_PATH, json=payload)
+                self._raise_for_status(response)
+                data = response.json()
+        except TimeoutError as exc:
+            raise self._translate_exception(exc) from exc
+        except httpx.HTTPError as exc:
+            raise self._translate_exception(exc) from exc
+        except json.JSONDecodeError as exc:
+            raise UpstreamProtocolError("upstream returned a non-JSON body") from exc
+
+        prompt_tokens = data.get("prompt_eval_count")
+        if prompt_tokens is not None and (type(prompt_tokens) is not int or prompt_tokens < 0):
+            raise UpstreamProtocolError("upstream embedding usage is invalid")
+        return AdapterEmbeddingResponse(
+            embeddings=parse_embedding_vectors(data.get("embeddings"), dimensions=request.dimensions),
+            prompt_tokens=prompt_tokens,
+            total_tokens=prompt_tokens,
+        )
 
     async def stream_chat(  # type: ignore[override]
         self, request: AdapterChatRequest

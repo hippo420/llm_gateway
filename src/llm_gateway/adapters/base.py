@@ -13,11 +13,13 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from ..core.errors import UnsupportedParameterError, UpstreamProtocolError
 from ..registry.models import ModelDeployment
 
 
@@ -47,6 +49,40 @@ class AdapterChatRequest:
     # adapter 고유 옵션 (예: ollama keep_alive).
     # 여러 adapter 가 공통으로 쓰기 시작하면 정식 필드로 승격할 것.
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AdapterEmbeddingRequest:
+    model: str
+    input: list[str]
+    dimensions: int | None = None
+
+
+@dataclass
+class AdapterEmbeddingResponse:
+    embeddings: list[list[float]]
+    prompt_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+def parse_embedding_vectors(value: Any, *, dimensions: int | None = None) -> list[list[float]]:
+    """Validate upstream vectors before returning them to API callers."""
+    if not isinstance(value, list) or not value:
+        raise UpstreamProtocolError("upstream embeddings must be a non-empty array")
+
+    vectors: list[list[float]] = []
+    expected_dimensions = dimensions
+    for vector in value:
+        if not isinstance(vector, list) or not vector:
+            raise UpstreamProtocolError("upstream embedding must be a non-empty array")
+        if expected_dimensions is None:
+            expected_dimensions = len(vector)
+        if len(vector) != expected_dimensions:
+            raise UpstreamProtocolError("upstream embedding dimensions do not match")
+        if any(type(item) not in (int, float) or not math.isfinite(item) for item in vector):
+            raise UpstreamProtocolError("upstream embedding contains an invalid value")
+        vectors.append([float(item) for item in vector])
+    return vectors
 
 
 @dataclass
@@ -126,3 +162,9 @@ class LLMAdapter(ABC):
     async def aclose(self) -> None:
         """HTTP client 등 자원 정리. 기본은 no-op."""
         return None
+
+    async def embed(self, request: AdapterEmbeddingRequest) -> AdapterEmbeddingResponse:
+        raise UnsupportedParameterError(
+            f"adapter {self.name} does not support embeddings",
+            detail={"adapter": self.name, "deployment_id": self.deployment.id},
+        )
