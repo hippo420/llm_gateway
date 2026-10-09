@@ -59,29 +59,31 @@ Phase 10: [구현·활성화 조건·한계](operations/results/2026-09-29-phase
 
 ## Docker 서비스 (포트 35000)
 
-Gateway는 컨테이너에서, LM Studio는 Docker 호스트의 1234 포트에서 실행한다.
-OpenAI 호환 어댑터(`openai`)로 `http://host.docker.internal:1234/v1`에 연결한다.
-Docker 전용 모델 설정은 `config/gateway.docker.yaml`이며 기존 개발 설정과 별도다.
+Gateway는 컨테이너에서, Ollama는 WSL의 11434 포트에서 실행한다.
+Ollama 전용 어댑터(`ollama`)로 `http://172.22.104.79:11434`에 연결하도록 설정한다.
+Docker 전용 모델 설정은 `config/gateway.docker.yaml`이다.
 
-| 요청의 model | 용도 | LM Studio 모델 ID (예시) |
+| 요청의 model | 용도 | Ollama 모델 이름 |
 | --- | --- | --- |
-| `summary` | 단순 요약 | `qwen3-4b` |
-| `analysis` | 분석 | `qwen3.5-9b` |
+| `summary` | 단순 요약 | `qwen3:4b` |
+| `analysis` | 분석 | `exaone3.5:7.8b` |
+| `embeddings` | 임베딩 (1024차원) | `bge-m3:latest` |
 
-LM Studio의 Developer → Local Server에서 서버를 시작하고 두 모델을 로드한다.
-Docker에서 접근할 수 있도록 **Serve on Local Network**를 활성화한다.
-서버 포트가 1234가 아니면 `config/gateway.docker.yaml`의 두 endpoint를 실제 포트로 변경한다.
+WSL에서 `ollama list`로 모델 설치를 확인하고 Ollama 서버를 실행한다.
+외부 접근에는 `OLLAMA_HOST=0.0.0.0:11434` 바인딩과 Windows에서 WSL로의 접근 경로가 필요하다.
+현재 WSL 주소는 `172.22.104.79`이며 `wsl hostname -I`로 확인할 수 있다.
+WSL 재시작으로 IP가 바뀌면 `config/gateway.docker.yaml`의 세 endpoint를 함께 변경한다.
+Docker에서 WSL 주소에 접근할 수 있어야 하며, 현재 연결 확인에서는 타임아웃이 발생했다.
+Windows 호스트의 `192.168.0.4:11434`는 LM Studio이므로 Ollama 주소로 사용하지 않는다.
+`config/evaluation.yaml`은 호스트/WSL에서 실행하는 평가 스크립트용으로 `127.0.0.1:11434`를 사용한다.
 
 ```bash
-curl http://localhost:1234/v1/models
+curl http://172.22.104.79:11434/api/tags
 ```
 
-반환된 `data[].id`를 설정의 각 `upstream_model`에 그대로 넣는다.
-위 표의 ID는 예시이며 다운로드한 모델의 식별자에 맞춰야 한다.
-endpoint에는 `/v1`을 한 번만 넣는다. 어댑터가 `chat/completions`와 `models`를 덧붙인다.
-LM Studio 인증을 사용하면 배포의 `api_key_env: LM_STUDIO_API_KEY`를 지정하고
-Compose의 Gateway environment에 `LM_STUDIO_API_KEY: "${LM_STUDIO_API_KEY}"`를 추가한다.
-Gateway 자체의 `GATEWAY_API_KEY`와 upstream 서버의 키는 별도다.
+반환된 `models[].name`을 설정의 각 `upstream_model`에 그대로 넣는다.
+endpoint에는 `/v1`이나 `/api`를 넣지 않는다. 어댑터가 `/api/chat`, `/api/embed`, `/api/tags`를 덧붙인다.
+임베딩 요청은 Gateway의 `/v1/embeddings`에 `model: "embeddings"`로 보낸다.
 
 ```bash
 docker compose up -d --build gateway
@@ -95,7 +97,7 @@ curl http://localhost:35000/v1/chat/completions \
 
 분석 요청은 `model`을 `analysis`로 지정한다. 내용에 따라 자동으로 모델을 분류하지 않는다.
 `GATEWAY_API_KEY`를 `.env`에 설정하면 요청에 `Authorization: Bearer <키>` 헤더를 추가한다.
-관리 API는 키 설정이 필수다. `readyz`는 서버 연결과 설정한 모델 ID가 `/v1/models`에 있는지 확인한다.
+관리 API는 키 설정이 필수다. `readyz`는 서버 연결과 설정한 모델 이름이 Ollama의 `/api/tags`에 있는지 확인한다.
 실제 모델 로딩 및 추론 성공 여부는 채팅 요청으로 확인한다.
 
 ```bash

@@ -1,0 +1,34 @@
+# Jenkins 전용: 설정은 Dockerfile이 이미지에 복사하므로 workspace mount가 필요 없다.
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:-llm-gateway:dev}
+    build: .
+    restart: unless-stopped
+    ports:
+      - "35000:35000"
+    env_file:
+      - ${GATEWAY_ENV_FILE:-/dev/null}
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "35000"
+      GATEWAY_CONFIG_PATH: config/gateway.docker.yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - gateway-evaluations:/app/operations/evaluations
+    networks:
+      - network_dev
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:35000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 6
+
+networks:
+  network_dev:
+    external: true
+    name: network_dev
+
+volumes:
+  gateway-evaluations:

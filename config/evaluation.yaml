@@ -17,8 +17,9 @@ temperature: 0
 seed: 0
 similarity:
   enabled: false                 # Requires an installed embedding model; no automatic pull.
-  endpoint: http://[::1]:11434
-  model: bge-m3
+  # 호스트/WSL에서 평가 스크립트를 실행할 때 사용. 컨테이너에서는 WSL 주소로 변경.
+  endpoint: http://127.0.0.1:11434
+  model: bge-m3:latest
   timeout_sec: 30
 judge:
   deployment_id: null             # Explicit enabled deployment, with a different upstream model.

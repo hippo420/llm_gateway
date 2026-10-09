@@ -1,4 +1,5 @@
-# http://192.168.0.4:11434/v1/models의 id와 upstream_model을 일치시킬 것.
+# Docker 호스트의 Ollama에 연결한다. Compose의 host-gateway 매핑을 사용한다.
+# /api/tags의 모델 이름과 upstream_model을 일치시킬 것.
 version: 1
 defaults:
   timeout:
@@ -9,23 +10,23 @@ models:
   summary:
     description: "단순 요약 — Qwen3 4B"
     deployments:
-      - id: qwen3-4b@lm-studio
-        adapter: openai
-        endpoint: http://host.docker.internal:11434/v1
-        upstream_model: qwen3-4b
+      - id: qwen3:4b
+        adapter: ollama
+        endpoint: http://host.docker.internal:11434
+        upstream_model: qwen3:4b
   analysis:
-    description: "분석 — Qwen3.5 9B"
+    description: "분석 — EXAONE 3.5 7.8B"
     deployments:
-      - id: qwen3.5-9b@lm-studio
-        adapter: openai
-        endpoint: http://host.docker.internal:11434/v1
-        upstream_model: qwen3.5-9b
+      - id: exaone3.5:7.8b
+        adapter: ollama
+        endpoint: http://host.docker.internal:11434
+        upstream_model: exaone3.5:7.8b
   embeddings:
     description: "텍스트 임베딩 — bge-m3 (1024차원). mony_batch pgvector 가 VECTOR(1024) 라 다른 모델로 바꾸면 안 된다"
     deployments:
-      - id: bge-m3@lm-studio
-        adapter: openai
-        endpoint: http://host.docker.internal:11434/v1
-        upstream_model: text-embedding-bge-m3-ko
+      - id: bge-m3
+        adapter: ollama
+        endpoint: http://host.docker.internal:11434
+        upstream_model: bge-m3:latest
 routing:
   strategy: static

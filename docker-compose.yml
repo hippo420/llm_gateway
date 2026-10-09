@@ -3,7 +3,7 @@
 #   docker compose up -d                    prometheus + grafana + node-exporter
 #   docker compose --profile gpu up -d      + nvidia exporter (컨테이너 GPU 접근이 될 때)
 #
-# Gateway는 컨테이너 :35000, LM Studio는 Docker 호스트 :1234/v1에서 실행한다.
+# Gateway는 컨테이너 :35000, Ollama는 WSL :11434에서 실행한다.
 #
 # 호스트 포트는 환경변수로 바꿀 수 있다. Windows 는 Hyper-V/WinNAT 가 포트 대역을 예약해서
 # 3000 같은 포트가 막혀 있을 수 있다 (`netsh interface ipv4 show excludedportrange protocol=tcp`).
