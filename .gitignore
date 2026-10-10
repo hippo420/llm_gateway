@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-ml/
+operations/results/financial-ai/
 venv/
 .env
 .pytest_cache/

@@ -1,7 +1,8 @@
 pipeline {
-    agent { label 'docker' }
+    agent any
 
     options {
+        skipDefaultCheckout(true)
         disableConcurrentBuilds()
         timestamps()
         timeout(time: 15, unit: 'MINUTES')
@@ -19,9 +20,12 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            steps { checkout scm }
+            steps {
+                git branch: 'master',
+                    credentialsId: 'hippo420',
+                    url: 'https://github.com/hippo420/llm_gateway.git'
+            }
         }
-
         stage('Check Docker') {
             steps {
                 sh '''

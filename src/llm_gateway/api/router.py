@@ -15,6 +15,7 @@ from .routes import (
     embeddings,
     evaluations,
     experiments,
+    gpu,
     health,
     models,
     policies,
@@ -30,6 +31,7 @@ v1_router.include_router(models.router)
 # 운영 엔드포인트 (health는 공개, diagnosis는 자체 Bearer dependency 적용)
 ops_router = APIRouter()
 ops_router.include_router(health.router)
+ops_router.include_router(gpu.router)
 ops_router.include_router(diagnosis.router)
 ops_router.include_router(config.router)
 ops_router.include_router(routing.router)

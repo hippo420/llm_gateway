@@ -46,6 +46,7 @@ class Settings(BaseSettings):
 
     # --- observability (Phase 2) ---
     metrics_enabled: bool = True
+    gpu_benchmark_results_path: Path = Path("operations/results/financial-ai/week-01")
 
     # Completed offline evaluation summaries, read by admin API and quality metrics.
     evaluation_results_path: Path = Path("operations/evaluations")
